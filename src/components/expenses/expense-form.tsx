@@ -11,7 +11,14 @@ import { evaluate, hasOperator, pressKey } from "@/lib/amount-expression";
 import { guessCurrency } from "@/lib/currencies";
 import { addDays, relativeDayLabel, todayISO } from "@/lib/dates";
 import { kindOf, type Expense, type Kind } from "@/lib/db/local";
-import { createExpense, createRecurringExpense, deleteExpense, setReimbursed, updateExpense } from "@/lib/db/mutations";
+import {
+  createCategory,
+  createExpense,
+  createRecurringExpense,
+  deleteExpense,
+  setReimbursed,
+  updateExpense,
+} from "@/lib/db/mutations";
 import {
   useCategories,
   useCategoryUsage,
@@ -24,8 +31,9 @@ import { currencySymbol, formatMoney, formatPlain, fractionDigits, fromMinor, to
 import { deleteReceipt, receiptUrl, uploadReceipt } from "@/lib/receipts";
 import { describeFrequency, type Frequency } from "@/lib/recurrence";
 import { extractTags } from "@/lib/tags";
+import { guessEmoji, leastUsedColor } from "@/lib/category-colors";
 import { cn } from "@/lib/utils";
-import { CategoryChip } from "./category-chip";
+import { CategoryPicker, CategoryQuickRow } from "./category-picker";
 import { NumberPad } from "./number-pad";
 import { useExpenseActions } from "./use-expense-actions";
 
@@ -84,6 +92,7 @@ export function ExpenseForm({ expense, prefill, onDone }: ExpenseFormProps) {
   const receiptThumb = receipt === "remove" ? null : (receiptPreview ?? existingReceiptUrl);
   const [repeat, setRepeat] = useState<Frequency | null>(null);
   const [panel, setPanel] = useState<Panel>(null);
+  const [pickingCategory, setPickingCategory] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const [saving, setSaving] = useState(false);
 
@@ -269,216 +278,237 @@ export function ExpenseForm({ expense, prefill, onDone }: ExpenseFormProps) {
         </p>
       </motion.div>
 
-      {/* Categories */}
-      <div className="-mx-6 flex gap-2 overflow-x-auto px-6 pb-1 no-scrollbar" role="group" aria-label="Category">
-        {chips.map((category) => (
-          <CategoryChip
-            key={category.id}
-            category={category}
-            selected={category.id === selectedCategoryId}
-            onClick={() => setCategoryId(category.id)}
-          />
-        ))}
-        <Link
-          href="/settings/categories"
-          onClick={onDone}
-          className="inline-flex h-10 shrink-0 items-center rounded-full border border-dashed border-line px-3.5 text-sm font-medium text-muted"
-        >
-          Edit
-        </Link>
-      </div>
-
-      {/* Details */}
-      <div>
-        <div className="flex gap-2 overflow-x-auto no-scrollbar">
-          <Pill active={panel === "date"} onClick={() => setPanel(panel === "date" ? null : "date")}>
-            <CalendarDays className="size-4" />
-            {relativeDayLabel(spentOn)}
-          </Pill>
-          {showPayment && (
-            <Pill active={panel === "payment"} onClick={() => setPanel(panel === "payment" ? null : "payment")}>
-              <Wallet className="size-4" />
-              {selectedPayment?.name ?? "Payment"}
-            </Pill>
-          )}
-          <Pill active={panel === "note"} onClick={() => setPanel(panel === "note" ? null : "note")}>
-            <PenLine className="size-4" />
-            <span className="max-w-32 truncate">{note || "Note"}</span>
-          </Pill>
-          {expense?.recurring_rule_id ? (
-            <Link
-              href="/settings/recurring"
-              onClick={onDone}
-              className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-surface-2 px-3.5 text-sm font-medium"
-            >
-              <Repeat className="size-4" />
-              Repeats · Manage
-            </Link>
-          ) : (
-            !expense && (
-              <Pill active={panel === "repeat"} onClick={() => setPanel(panel === "repeat" ? null : "repeat")}>
-                <Repeat className="size-4" />
-                {repeat ? describeFrequency(repeat) : "Repeat"}
-              </Pill>
-            )
-          )}
-          {kind === "expense" && (
-            <Pill active={reimbursable} aria-pressed={reimbursable} onClick={() => setReimbursable((r) => !r)}>
-              <Briefcase className="size-4" />
-              {reimbursable ? "Work · claim back" : "Work expense"}
-            </Pill>
-          )}
-          <Pill
-            active={panel === "receipt"}
-            onClick={() =>
-              receiptThumb ? setPanel(panel === "receipt" ? null : "receipt") : fileInput.current?.click()
-            }
-          >
-            {receiptThumb ? (
-              // eslint-disable-next-line @next/next/no-img-element -- blob/signed URLs, not optimisable
-              <img src={receiptThumb} alt="" className="-ml-1.5 size-6 rounded-md object-cover" />
-            ) : (
-              <Camera className="size-4" />
-            )}
-            Receipt
-          </Pill>
-          <input
-            ref={fileInput}
-            type="file"
-            accept="image/*"
-            hidden
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) setReceipt(file);
-              e.target.value = "";
+      {pickingCategory ? (
+        <CategoryPicker
+          categories={chips}
+          selectedId={selectedCategoryId}
+          onSelect={(id) => {
+            setCategoryId(id);
+            setPickingCategory(false);
+          }}
+          onCreate={async (name) => {
+            const created = await createCategory(db, {
+              name,
+              kind,
+              emoji: guessEmoji(name),
+              color: leastUsedColor(categories ?? []),
+            });
+            setCategoryId(created.id);
+            setPickingCategory(false);
+            toast.success(`Created ${created.emoji} ${created.name}`);
+          }}
+          onBack={() => setPickingCategory(false)}
+          onManage={onDone}
+        />
+      ) : (
+        <>
+          <CategoryQuickRow
+            categories={chips}
+            selectedId={selectedCategoryId}
+            onSelect={setCategoryId}
+            onMore={() => {
+              setPanel(null);
+              setPickingCategory(true);
             }}
           />
-        </div>
 
-        {expense?.reimbursable && kind === "expense" && reimbursable && (
-          <div className="mt-2 flex items-center justify-between gap-3 rounded-2xl bg-surface-2 px-4 py-2.5 text-sm">
-            <span className="text-muted">
-              {expense.reimbursed_at ? "Paid back." : "Not counted in your spending until paid back."}
-            </span>
-            <button
-              type="button"
-              className="shrink-0 font-semibold text-ink"
-              onClick={() => {
-                setReimbursed(db, expense, !expense.reimbursed_at);
-                toast.success(expense.reimbursed_at ? "Marked as still owed" : "Marked as paid back");
-                onDone();
-              }}
-            >
-              {expense.reimbursed_at ? "Undo" : "Mark paid back"}
-            </button>
-          </div>
-        )}
-
-        {panel === "receipt" && receiptThumb && (
-          <div className="mt-2 flex items-center gap-3">
-            <a href={receiptThumb} target="_blank" rel="noreferrer" className="shrink-0">
-              {/* eslint-disable-next-line @next/next/no-img-element -- blob/signed URLs, not optimisable */}
-              <img src={receiptThumb} alt="Receipt" className="size-20 rounded-xl border border-line object-cover" />
-            </a>
-            <div className="flex flex-wrap gap-2">
-              <OptionChip selected={false} onClick={() => fileInput.current?.click()}>
-                Replace
-              </OptionChip>
-              <OptionChip
-                selected={false}
-                onClick={() => pick(() => setReceipt(expense?.receipt_path ? "remove" : null))}
+          {/* Details */}
+          <div>
+            <div className="flex gap-2 overflow-x-auto no-scrollbar">
+              <Pill active={panel === "date"} onClick={() => setPanel(panel === "date" ? null : "date")}>
+                <CalendarDays className="size-4" />
+                {relativeDayLabel(spentOn)}
+              </Pill>
+              {showPayment && (
+                <Pill active={panel === "payment"} onClick={() => setPanel(panel === "payment" ? null : "payment")}>
+                  <Wallet className="size-4" />
+                  {selectedPayment?.name ?? "Payment"}
+                </Pill>
+              )}
+              <Pill active={panel === "note"} onClick={() => setPanel(panel === "note" ? null : "note")}>
+                <PenLine className="size-4" />
+                <span className="max-w-32 truncate">{note || "Note"}</span>
+              </Pill>
+              {expense?.recurring_rule_id ? (
+                <Link
+                  href="/settings/recurring"
+                  onClick={onDone}
+                  className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-surface-2 px-3.5 text-sm font-medium"
+                >
+                  <Repeat className="size-4" />
+                  Repeats · Manage
+                </Link>
+              ) : (
+                !expense && (
+                  <Pill active={panel === "repeat"} onClick={() => setPanel(panel === "repeat" ? null : "repeat")}>
+                    <Repeat className="size-4" />
+                    {repeat ? describeFrequency(repeat) : "Repeat"}
+                  </Pill>
+                )
+              )}
+              {kind === "expense" && (
+                <Pill active={reimbursable} aria-pressed={reimbursable} onClick={() => setReimbursable((r) => !r)}>
+                  <Briefcase className="size-4" />
+                  {reimbursable ? "Work · claim back" : "Work expense"}
+                </Pill>
+              )}
+              <Pill
+                active={panel === "receipt"}
+                onClick={() =>
+                  receiptThumb ? setPanel(panel === "receipt" ? null : "receipt") : fileInput.current?.click()
+                }
               >
-                Remove
-              </OptionChip>
-            </div>
-          </div>
-        )}
-
-        {panel === "date" && (
-          <div className="mt-2 flex flex-wrap gap-2">
-            <OptionChip selected={spentOn === todayISO()} onClick={() => pick(() => setSpentOn(todayISO()))}>
-              Today
-            </OptionChip>
-            <OptionChip
-              selected={spentOn === addDays(todayISO(), -1)}
-              onClick={() => pick(() => setSpentOn(addDays(todayISO(), -1)))}
-            >
-              Yesterday
-            </OptionChip>
-            <label className="relative inline-flex h-9 items-center rounded-full border border-line bg-surface px-3.5 text-sm font-medium">
-              Pick a date…
+                {receiptThumb ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- blob/signed URLs, not optimisable
+                  <img src={receiptThumb} alt="" className="-ml-1.5 size-6 rounded-md object-cover" />
+                ) : (
+                  <Camera className="size-4" />
+                )}
+                Receipt
+              </Pill>
               <input
-                type="date"
-                aria-label="Pick a date"
-                value={spentOn}
-                max={todayISO()}
-                onChange={(e) => e.target.value && pick(() => setSpentOn(e.target.value))}
-                className="absolute inset-0 opacity-0"
+                ref={fileInput}
+                type="file"
+                accept="image/*"
+                hidden
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) setReceipt(file);
+                  e.target.value = "";
+                }}
               />
-            </label>
-          </div>
-        )}
+            </div>
 
-        {panel === "payment" && (
-          <div className="mt-2 flex flex-wrap gap-2">
-            {paymentMethods?.map((method) => (
-              <OptionChip
-                key={method.id}
-                selected={method.id === selectedPaymentId}
-                onClick={() => pick(() => setPaymentMethodId(method.id))}
-              >
-                {method.name}
-              </OptionChip>
-            ))}
-            <OptionChip selected={!selectedPaymentId} onClick={() => pick(() => setPaymentMethodId(null))}>
-              None
-            </OptionChip>
-          </div>
-        )}
+            {expense?.reimbursable && kind === "expense" && reimbursable && (
+              <div className="mt-2 flex items-center justify-between gap-3 rounded-2xl bg-surface-2 px-4 py-2.5 text-sm">
+                <span className="text-muted">
+                  {expense.reimbursed_at ? "Paid back." : "Not counted in your spending until paid back."}
+                </span>
+                <button
+                  type="button"
+                  className="shrink-0 font-semibold text-ink"
+                  onClick={() => {
+                    setReimbursed(db, expense, !expense.reimbursed_at);
+                    toast.success(expense.reimbursed_at ? "Marked as still owed" : "Marked as paid back");
+                    onDone();
+                  }}
+                >
+                  {expense.reimbursed_at ? "Undo" : "Mark paid back"}
+                </button>
+              </div>
+            )}
 
-        {panel === "note" && (
-          <Input
-            autoFocus
-            className="mt-2 h-12"
-            placeholder="What was it for?"
-            value={note}
-            maxLength={500}
-            enterKeyHint="done"
-            onChange={(e) => setNote(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && (e.currentTarget.blur(), setPanel(null))}
+            {panel === "receipt" && receiptThumb && (
+              <div className="mt-2 flex items-center gap-3">
+                <a href={receiptThumb} target="_blank" rel="noreferrer" className="shrink-0">
+                  {/* eslint-disable-next-line @next/next/no-img-element -- blob/signed URLs, not optimisable */}
+                  <img
+                    src={receiptThumb}
+                    alt="Receipt"
+                    className="size-20 rounded-xl border border-line object-cover"
+                  />
+                </a>
+                <div className="flex flex-wrap gap-2">
+                  <OptionChip selected={false} onClick={() => fileInput.current?.click()}>
+                    Replace
+                  </OptionChip>
+                  <OptionChip
+                    selected={false}
+                    onClick={() => pick(() => setReceipt(expense?.receipt_path ? "remove" : null))}
+                  >
+                    Remove
+                  </OptionChip>
+                </div>
+              </div>
+            )}
+
+            {panel === "date" && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                <OptionChip selected={spentOn === todayISO()} onClick={() => pick(() => setSpentOn(todayISO()))}>
+                  Today
+                </OptionChip>
+                <OptionChip
+                  selected={spentOn === addDays(todayISO(), -1)}
+                  onClick={() => pick(() => setSpentOn(addDays(todayISO(), -1)))}
+                >
+                  Yesterday
+                </OptionChip>
+                <label className="relative inline-flex h-9 items-center rounded-full border border-line bg-surface px-3.5 text-sm font-medium">
+                  Pick a date…
+                  <input
+                    type="date"
+                    aria-label="Pick a date"
+                    value={spentOn}
+                    max={todayISO()}
+                    onChange={(e) => e.target.value && pick(() => setSpentOn(e.target.value))}
+                    className="absolute inset-0 opacity-0"
+                  />
+                </label>
+              </div>
+            )}
+
+            {panel === "payment" && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {paymentMethods?.map((method) => (
+                  <OptionChip
+                    key={method.id}
+                    selected={method.id === selectedPaymentId}
+                    onClick={() => pick(() => setPaymentMethodId(method.id))}
+                  >
+                    {method.name}
+                  </OptionChip>
+                ))}
+                <OptionChip selected={!selectedPaymentId} onClick={() => pick(() => setPaymentMethodId(null))}>
+                  None
+                </OptionChip>
+              </div>
+            )}
+
+            {panel === "note" && (
+              <Input
+                autoFocus
+                className="mt-2 h-12"
+                placeholder="What was it for?"
+                value={note}
+                maxLength={500}
+                enterKeyHint="done"
+                onChange={(e) => setNote(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && (e.currentTarget.blur(), setPanel(null))}
+              />
+            )}
+            {panel === "note" && (
+              <p className="mt-1.5 truncate px-1 text-sm text-subtle">
+                {extractTags(note).length
+                  ? extractTags(note)
+                      .map((tag) => `#${tag}`)
+                      .join("  ")
+                  : "Tip: add #tags, like #goa-trip"}
+              </p>
+            )}
+
+            {panel === "repeat" && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                <OptionChip selected={!repeat} onClick={() => pick(() => setRepeat(null))}>
+                  Doesn&apos;t repeat
+                </OptionChip>
+                {REPEAT_OPTIONS.map((option) => (
+                  <OptionChip key={option} selected={repeat === option} onClick={() => pick(() => setRepeat(option))}>
+                    {describeFrequency(option)}
+                  </OptionChip>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <NumberPad
+            onKey={(key) => setExpression((current) => pressKey(current, key, decimals))}
+            onSave={save}
+            saveLabel={expense ? "Save" : kind === "income" ? "Add income" : "Add"}
+            saveDisabled={saving || !selectedCategoryId}
+            allowDecimal={decimals > 0}
           />
-        )}
-        {panel === "note" && (
-          <p className="mt-1.5 truncate px-1 text-sm text-subtle">
-            {extractTags(note).length
-              ? extractTags(note)
-                  .map((tag) => `#${tag}`)
-                  .join("  ")
-              : "Tip: add #tags, like #goa-trip"}
-          </p>
-        )}
-
-        {panel === "repeat" && (
-          <div className="mt-2 flex flex-wrap gap-2">
-            <OptionChip selected={!repeat} onClick={() => pick(() => setRepeat(null))}>
-              Doesn&apos;t repeat
-            </OptionChip>
-            {REPEAT_OPTIONS.map((option) => (
-              <OptionChip key={option} selected={repeat === option} onClick={() => pick(() => setRepeat(option))}>
-                {describeFrequency(option)}
-              </OptionChip>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <NumberPad
-        onKey={(key) => setExpression((current) => pressKey(current, key, decimals))}
-        onSave={save}
-        saveLabel={expense ? "Save" : kind === "income" ? "Add income" : "Add"}
-        saveDisabled={saving || !selectedCategoryId}
-        allowDecimal={decimals > 0}
-      />
+        </>
+      )}
       <button id="expense-save" type="button" hidden onClick={save} />
     </div>
   );

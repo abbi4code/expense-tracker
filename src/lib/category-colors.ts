@@ -79,3 +79,51 @@ export const CATEGORY_EMOJIS = [
   "💸",
   "📦",
 ];
+
+// Emoji for a category created from the picker's search ("Coffee" → ☕). Fallback: a tag.
+const EMOJI_HINTS: [RegExp, string][] = [
+  [/coffee|cafe|chai|tea/i, "☕"],
+  [/food|lunch|dinner|snack|restaurant|eat/i, "🍔"],
+  [/drink|bar|beer|alcohol/i, "🍺"],
+  [/grocer|vegetable|fruit|milk/i, "🛒"],
+  [/cab|taxi|uber|ola|auto|metro|bus|commute/i, "🚕"],
+  [/fuel|petrol|diesel/i, "⛽"],
+  [/car|bike|vehicle/i, "🚗"],
+  [/flight|travel|trip|holiday|vacation/i, "✈️"],
+  [/hotel|stay/i, "🏨"],
+  [/rent|house|home|flat/i, "🏠"],
+  [/electric|bill|utility|water|gas/i, "💡"],
+  [/phone|mobile|recharge/i, "📱"],
+  [/internet|wifi|broadband/i, "🌐"],
+  [/subscription|netflix|spotify|prime|ott/i, "🔁"],
+  [/cloth|shirt|fashion|shoe/i, "👕"],
+  [/shop|amazon|flipkart/i, "🛍️"],
+  [/health|medic|doctor|pharma|hospital/i, "💊"],
+  [/gym|fitness|sport|yoga/i, "🏋️"],
+  [/beauty|salon|hair|makeup|spa/i, "💅"],
+  [/movie|cinema|entertain|game|concert/i, "🎬"],
+  [/music/i, "🎵"],
+  [/book|course|educat|school|college|fees|tuition/i, "📚"],
+  [/gift|present/i, "🎁"],
+  [/pet|dog|cat/i, "🐶"],
+  [/kid|baby|child/i, "👶"],
+  [/party|celebrat/i, "🎉"],
+  [/donat|charity|temple/i, "🙏"],
+  [/emi|loan|bank|fee|tax|insurance/i, "🏦"],
+  [/invest|stock|mutual|sip/i, "📈"],
+  [/repair|maintenance|plumb|electrician/i, "🔧"],
+  [/clean|laundry|maid|help/i, "🧹"],
+  [/work|office|business/i, "💼"],
+  [/salary|income|freelance/i, "💰"],
+];
+
+export function guessEmoji(name: string): string {
+  return EMOJI_HINTS.find(([pattern]) => pattern.test(name))?.[1] ?? "🏷️";
+}
+
+/** The colour fewest categories use, so a new category stands apart. */
+export function leastUsedColor(categories: { color: string }[]): string {
+  const counts = new Map(COLOR_NAMES.map((c) => [c, 0]));
+  for (const c of categories) if (counts.has(c.color)) counts.set(c.color, counts.get(c.color)! + 1);
+  return [...counts].sort((a, b) => a[1] - b[1])[0][0];
+}

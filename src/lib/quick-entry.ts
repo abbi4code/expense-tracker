@@ -19,7 +19,7 @@ export type QuickEntry = {
 };
 
 // Built-in hints for the default categories (matched by category name, so renamed ones just miss).
-const KEYWORDS: Record<string, string[]> = {
+export const KEYWORDS: Record<string, string[]> = {
   "Food & Drinks": [
     "coffee",
     "chai",
