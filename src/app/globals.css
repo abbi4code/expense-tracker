@@ -1,0 +1,125 @@
+@import "tailwindcss";
+
+/* Theme is driven by a `.dark` class (next-themes), defaulting to the system setting. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Design tokens — "Calm & tactile" (see .claude/01-design-system.md). */
+:root {
+  --bg: #f6f4ef;
+  --surface: #ffffff;
+  --surface-2: #eeebe4;
+  --ink: #161513;
+  --muted: #6b6760;
+  --subtle: #a29e96;
+  --line: #e6e2da;
+  --accent: #c8f169;
+  --accent-ink: #161513;
+  --danger: #d6453d;
+  --success: #2f9e63;
+  --warning: #b7791f;
+}
+
+.dark {
+  --bg: #0e0e10;
+  --surface: #17171a;
+  --surface-2: #222226;
+  --ink: #f3f1ec;
+  --muted: #a3a09a;
+  --subtle: #6c6963;
+  --line: #28282d;
+  --accent: #c8f169;
+  --accent-ink: #161513;
+  --danger: #f06a61;
+  --success: #52c486;
+  --warning: #e0a84a;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-danger: var(--danger);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  --radius-card: 1.5rem;
+}
+
+@utility pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+html {
+  background: var(--bg);
+  color-scheme: light;
+}
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+  text-rendering: optimizeLegibility;
+}
+
+/* Native-app feel: no text selection or callouts on UI chrome. */
+button,
+nav,
+[role="tab"] {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Category colour chips: set via categoryStyle() inline variables. */
+@utility cat-bg {
+  background-color: var(--cat-bg-light);
+  .dark & {
+    background-color: var(--cat-bg-dark);
+  }
+}
+@utility cat-fg {
+  color: var(--cat-fg-light);
+  .dark & {
+    color: var(--cat-fg-dark);
+  }
+}
+@utility cat-fill {
+  background-color: var(--cat-fg-light);
+  .dark & {
+    background-color: var(--cat-fg-dark);
+  }
+}
+
+/* Hide scrollbars on horizontal chip rows while keeping them scrollable. */
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
