@@ -6,7 +6,13 @@ import { createContext, useContext, useEffect, useMemo, useState, useSyncExterna
 import { toast } from "sonner";
 import { todayISO } from "@/lib/dates";
 import { kindOf, openLocalDB, type LocalDB } from "@/lib/db/local";
-import { addDueRecurringExpenses, setSyncRequester, syncGroupShares, updateProfile } from "@/lib/db/mutations";
+import {
+  addDueGroupOccurrences,
+  addDueRecurringExpenses,
+  setSyncRequester,
+  syncGroupShares,
+  updateProfile,
+} from "@/lib/db/mutations";
 import { SyncEngine } from "@/lib/db/sync";
 import { parseQuickEntry } from "@/lib/quick-entry";
 import {
@@ -82,6 +88,8 @@ function UserData({ userId, email, children }: { userId: string; email: string |
       setSyncedNow(true);
       if (!(await db.meta.get("initialSyncDone"))?.value) return;
       await addDueRecurringExpenses(db);
+      // Months that came due for repeating group expenses (rent…), before mirroring shares.
+      await addDueGroupOccurrences(db);
       // Your share of group expenses → personal expenses (category guessed from the description).
       const categories = (await db.categories.toArray()).filter((c) => !c.deleted_at && kindOf(c) === "expense");
       const fallback = categories.find((c) => c.name === "Other")?.id ?? categories[0]?.id ?? null;

@@ -1,6 +1,17 @@
 "use client";
 
-import { Briefcase, CalendarDays, Camera, Copy, PenLine, Repeat, Trash2, Wallet } from "lucide-react";
+import {
+  Briefcase,
+  CalendarDays,
+  Camera,
+  ClipboardPaste,
+  Copy,
+  PenLine,
+  Repeat,
+  Star,
+  Trash2,
+  Wallet,
+} from "lucide-react";
 import { motion, useAnimationControls } from "motion/react";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -12,16 +23,19 @@ import { guessCurrency } from "@/lib/currencies";
 import { addDays, relativeDayLabel, todayISO } from "@/lib/dates";
 import { kindOf, type Expense, type Kind } from "@/lib/db/local";
 import {
+  addFavourite,
   createCategory,
   createExpense,
   createRecurringExpense,
   deleteExpense,
+  removeFavourite,
   setReimbursed,
   updateExpense,
 } from "@/lib/db/mutations";
 import {
   useCategories,
   useCategoryUsage,
+  useFavourites,
   useNoteSuggestions,
   usePaymentMethods,
   useProfile,
@@ -32,12 +46,14 @@ import { deleteReceipt, receiptUrl, uploadReceipt } from "@/lib/receipts";
 import { describeFrequency, type Frequency } from "@/lib/recurrence";
 import { extractTags } from "@/lib/tags";
 import { guessEmoji, leastUsedColor } from "@/lib/category-colors";
+import { favouriteKey } from "@/lib/favourites";
+import { useQuickEntryParser } from "@/lib/use-quick-entry";
 import { cn } from "@/lib/utils";
 import { CategoryPicker, CategoryQuickRow } from "./category-picker";
 import { NumberPad } from "./number-pad";
 import { useExpenseActions } from "./use-expense-actions";
 
-type Panel = "date" | "payment" | "note" | "repeat" | "receipt" | null;
+type Panel = "date" | "payment" | "note" | "repeat" | "receipt" | "paste" | null;
 
 const REPEAT_OPTIONS: Frequency[] = ["weekly", "monthly", "yearly"];
 
@@ -68,6 +84,8 @@ export function ExpenseForm({ expense, prefill, onDone }: ExpenseFormProps) {
   const lastExpense = useRecentExpenses(1)?.[0];
   const actions = useExpenseActions();
   const shake = useAnimationControls();
+  const { parseShared } = useQuickEntryParser();
+  const favourites = useFavourites();
 
   const currency = expense?.currency ?? profile?.currency ?? guessCurrency();
   const decimals = fractionDigits(currency);
@@ -121,6 +139,14 @@ export function ExpenseForm({ expense, prefill, onDone }: ExpenseFormProps) {
   const amount = evaluate(expression);
   const amountMinor = toMinor(amount, currency);
   const valid = amountMinor > 0 && Boolean(selectedCategoryId);
+  const favouriteDraft = {
+    amount_minor: amountMinor,
+    currency,
+    category_id: selectedCategoryId ?? "",
+    payment_method_id: selectedPaymentId ?? null,
+    note: note.trim() || null,
+  };
+  const pinned = favourites?.find((f) => favouriteKey(f) === favouriteKey(favouriteDraft));
 
   async function save() {
     if (!valid || saving) {
@@ -315,6 +341,16 @@ export function ExpenseForm({ expense, prefill, onDone }: ExpenseFormProps) {
           {/* Details */}
           <div>
             <div className="flex gap-2 overflow-x-auto no-scrollbar">
+              {!expense && (
+                <Pill
+                  active={panel === "paste"}
+                  aria-label="Paste a payment message"
+                  onClick={() => (panel === "paste" ? setPanel(null) : pasteFromClipboard())}
+                >
+                  <ClipboardPaste className="size-4" />
+                  Paste
+                </Pill>
+              )}
               <Pill active={panel === "date"} onClick={() => setPanel(panel === "date" ? null : "date")}>
                 <CalendarDays className="size-4" />
                 {relativeDayLabel(spentOn)}
@@ -350,6 +386,12 @@ export function ExpenseForm({ expense, prefill, onDone }: ExpenseFormProps) {
                 <Pill active={reimbursable} aria-pressed={reimbursable} onClick={() => setReimbursable((r) => !r)}>
                   <Briefcase className="size-4" />
                   {reimbursable ? "Work · claim back" : "Work expense"}
+                </Pill>
+              )}
+              {expense && kind === "expense" && (
+                <Pill active={Boolean(pinned)} aria-pressed={Boolean(pinned)} onClick={toggleFavourite}>
+                  <Star className={cn("size-4", pinned && "fill-current")} />
+                  Favourite
                 </Pill>
               )}
               <Pill
@@ -464,6 +506,24 @@ export function ExpenseForm({ expense, prefill, onDone }: ExpenseFormProps) {
               </div>
             )}
 
+            {panel === "paste" && (
+              <Input
+                autoFocus
+                className="mt-2 h-12"
+                aria-label="Payment message"
+                placeholder="Paste the payment SMS here"
+                enterKeyHint="done"
+                onPaste={(e) => {
+                  e.preventDefault();
+                  fillFromMessage(e.clipboardData.getData("text"));
+                }}
+                onKeyDown={(e) => e.key === "Enter" && fillFromMessage(e.currentTarget.value)}
+              />
+            )}
+            {panel === "paste" && (
+              <p className="mt-1.5 px-1 text-sm text-subtle">Long-press the box and choose Paste.</p>
+            )}
+
             {panel === "note" && (
               <Input
                 autoFocus
@@ -500,13 +560,16 @@ export function ExpenseForm({ expense, prefill, onDone }: ExpenseFormProps) {
             )}
           </div>
 
-          <NumberPad
-            onKey={(key) => setExpression((current) => pressKey(current, key, decimals))}
-            onSave={save}
-            saveLabel={expense ? "Save" : kind === "income" ? "Add income" : "Add"}
-            saveDisabled={saving || !selectedCategoryId}
-            allowDecimal={decimals > 0}
-          />
+          {/* Pasting needs the (system) keyboard, not the pad; it comes back once the message fills in. */}
+          {panel !== "paste" && (
+            <NumberPad
+              onKey={(key) => setExpression((current) => pressKey(current, key, decimals))}
+              onSave={save}
+              saveLabel={expense ? "Save" : kind === "income" ? "Add income" : "Add"}
+              saveDisabled={saving || !selectedCategoryId}
+              allowDecimal={decimals > 0}
+            />
+          )}
         </>
       )}
       <button id="expense-save" type="button" hidden onClick={save} />
@@ -516,6 +579,42 @@ export function ExpenseForm({ expense, prefill, onDone }: ExpenseFormProps) {
   function pick(apply: () => void) {
     apply();
     setPanel(null);
+  }
+
+  /** Pins this spend to Home (one tap to log it again), or unpins it. */
+  async function toggleFavourite() {
+    if (pinned) {
+      await removeFavourite(db, pinned);
+      return toast("Removed from favourites");
+    }
+    if (!valid) return toast.error("Enter an amount first.");
+    await addFavourite(db, favouriteDraft);
+    toast.success("Pinned to Home. Tap it there to log it again.");
+  }
+
+  /** Reads the clipboard; where the browser won't allow it, shows a box to paste into instead. */
+  async function pasteFromClipboard() {
+    const text = await navigator.clipboard?.readText().catch(() => "");
+    if (text?.trim()) fillFromMessage(text);
+    else setPanel("paste");
+  }
+
+  /** Fills the sheet from a bank SMS / UPI confirmation. */
+  function fillFromMessage(text: string) {
+    const draft = parseShared(text);
+    if (!draft.amount) return toast.error("Couldn't find an amount in that message.");
+    if (draft.credit && !profile?.track_income) return toast.error("That message is money received, not spent.");
+    setExpression(String(draft.amount));
+    setSpentOn(draft.spentOn);
+    if (draft.note) setNote(draft.note);
+    if (draft.paymentMethodId) setPaymentMethodId(draft.paymentMethodId);
+    if (draft.credit) {
+      setKind("income");
+      setCategoryId(undefined);
+      setRepeat(null);
+    } else if (draft.categoryId) setCategoryId(draft.categoryId);
+    setPanel(null);
+    toast.success(draft.credit ? "Filled in as income" : "Filled from your message");
   }
 }
 

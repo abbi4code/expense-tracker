@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, Plus, Settings2, UserPlus } from "lucide-react";
+import { ArrowRight, CircleAlert, Plus, Repeat, Settings2, UserPlus } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { BackHeader } from "@/components/app/back-header";
@@ -11,16 +11,17 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Sheet } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { relativeDayLabel } from "@/lib/dates";
-import type { GroupExpense } from "@/lib/db/local";
+import type { GroupExpense, GroupRecurringRule } from "@/lib/db/local";
 import { useGroupDetail, useInitialSyncDone } from "@/lib/db/queries";
 import { formatMoney } from "@/lib/money";
 import type { Split, Transfer } from "@/lib/splits";
 import { useHiddenWhileScrollingDown } from "@/lib/use-scroll-direction";
 import { cn } from "@/lib/utils";
-import { balanceText, memberName } from "./format";
+import { balanceText, memberLabel, memberName } from "./format";
 import { GroupExpenseForm } from "./group-expense-form";
 import { GroupSettingsSheet, shareInvite } from "./group-settings-sheet";
 import { MemberAvatar } from "./member-avatar";
+import { MemberName } from "./member-name";
 import { SettleSheet } from "./settle-sheet";
 
 type Tab = "expenses" | "balances";
@@ -34,11 +35,12 @@ export function GroupScreen({ groupId }: { groupId: string }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<Tab>("expenses");
-  const [editing, setEditing] = useState<{ open: boolean; expense: GroupExpense | null; version: number }>({
-    open: false,
-    expense: null,
-    version: 0,
-  });
+  const [editing, setEditing] = useState<{
+    open: boolean;
+    expense: GroupExpense | null;
+    rule: GroupRecurringRule | null;
+    version: number;
+  }>({ open: false, expense: null, rule: null, version: 0 });
   const [settling, setSettling] = useState<Transfer | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -64,13 +66,22 @@ export function GroupScreen({ groupId }: { groupId: string }) {
     );
   }
 
-  const { group, members, active, me, expenses, settlements, balances, transfers } = detail;
+  const { group, members, active, me, expenses, settlements, balances, transfers, rules } = detail;
   const currency = group.currency;
   const byId = new Map(members.map((m) => [m.id, m]));
   const myBalance = balances.get(me.id) ?? 0;
   const mine = balanceText(myBalance, currency);
   const myTransfers = transfers.filter((t) => t.from === me.id || t.to === me.id);
-  const openAdd = () => setEditing((s) => ({ open: true, expense: null, version: s.version + 1 }));
+  // People who left still show while they owe or are owed, and on expenses they were part of.
+  const balanceMembers = members.filter((m) => !m.deleted_at || (balances.get(m.id) ?? 0) !== 0);
+  const involvedIn = (row: { paid_by_member_id: string; splits: unknown }) => [
+    row.paid_by_member_id,
+    ...(row.splits as Split[]).map((s) => s.member_id),
+  ];
+  const editingRow = editing.expense ?? editing.rule;
+  const involved = new Set(editingRow ? involvedIn(editingRow) : []);
+  const formMembers = [me, ...members.filter((m) => m.id !== me.id && (!m.deleted_at || involved.has(m.id)))];
+  const openAdd = () => setEditing((s) => ({ open: true, expense: null, rule: null, version: s.version + 1 }));
 
   // One timeline: expenses and payments, newest first, grouped by day.
   const timeline = [
@@ -125,11 +136,11 @@ export function GroupScreen({ groupId }: { groupId: string }) {
                 <span className="min-w-0 flex-1 text-muted">
                   {t.from === me.id ? (
                     <>
-                      You owe <span className="font-medium text-ink">{memberName(byId.get(t.to), me.id)}</span>
+                      You owe <span className="font-medium text-ink">{memberLabel(byId.get(t.to), me.id)}</span>
                     </>
                   ) : (
                     <>
-                      <span className="font-medium text-ink">{memberName(byId.get(t.from), me.id)}</span> owes you
+                      <span className="font-medium text-ink">{memberLabel(byId.get(t.from), me.id)}</span> owes you
                     </>
                   )}
                 </span>
@@ -160,6 +171,45 @@ export function GroupScreen({ groupId }: { groupId: string }) {
         ))}
       </div>
 
+      {tab === "expenses" && rules.length > 0 && (
+        <section className="mt-5" aria-label="Repeating">
+          <h3 className="mb-2 px-1 text-sm font-semibold tracking-wide text-muted uppercase">Repeating</h3>
+          <ul className="space-y-2">
+            {rules.map((rule) => {
+              const payer = memberName(byId.get(rule.paid_by_member_id), me.id);
+              const left = [...new Set(involvedIn(rule))].map((id) => byId.get(id)).filter((m) => m?.deleted_at);
+              return (
+                <li key={rule.id}>
+                  <button
+                    type="button"
+                    onClick={() => setEditing((s) => ({ open: true, expense: null, rule, version: s.version + 1 }))}
+                    className="w-full rounded-2xl border border-line bg-surface px-4 py-3 text-left transition active:bg-surface-2"
+                  >
+                    <span className="flex items-center gap-2 text-[15px]">
+                      <Repeat className="size-4 shrink-0 text-muted" aria-hidden />
+                      <span className="min-w-0 flex-1 truncate font-medium">{rule.description}</span>
+                      <span className="shrink-0 font-semibold tabular-nums">
+                        {formatMoney(rule.amount_minor, rule.currency)}
+                      </span>
+                    </span>
+                    <span className="mt-0.5 block text-sm text-muted">
+                      {payer === "You" ? "You pay" : `${payer} pays`} · every month ·{" "}
+                      {rule.is_active ? `next on ${relativeDayLabel(rule.next_due_on)}` : "paused"}
+                    </span>
+                    {left.length > 0 && (
+                      <span className="mt-1.5 flex items-center gap-1.5 text-sm text-ink">
+                        <CircleAlert className="size-4 shrink-0" aria-hidden />
+                        {left.map((m) => m!.display_name).join(", ")} left. Update the split.
+                      </span>
+                    )}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
+
       {tab === "expenses" ? (
         timeline.length === 0 ? (
           <EmptyState
@@ -185,7 +235,12 @@ export function GroupScreen({ groupId }: { groupId: string }) {
                           payer={memberName(byId.get(item.expense.paid_by_member_id), me.id)}
                           payerName={byId.get(item.expense.paid_by_member_id)?.display_name ?? "?"}
                           onOpen={() =>
-                            setEditing((s) => ({ open: true, expense: item.expense, version: s.version + 1 }))
+                            setEditing((s) => ({
+                              open: true,
+                              expense: item.expense,
+                              rule: null,
+                              version: s.version + 1,
+                            }))
                           }
                         />
                       ) : (
@@ -216,12 +271,12 @@ export function GroupScreen({ groupId }: { groupId: string }) {
       ) : (
         <div className="mt-5 space-y-6">
           <ul className="divide-y divide-line rounded-card border border-line bg-surface">
-            {active.map((m) => {
+            {balanceMembers.map((m) => {
               const net = balances.get(m.id) ?? 0;
               return (
                 <li key={m.id} className="flex items-center gap-3 px-4 py-3">
                   <MemberAvatar id={m.id} name={m.display_name} />
-                  <span className="min-w-0 flex-1 truncate text-[15px] font-medium">{memberName(m, me.id)}</span>
+                  <MemberName member={m} myId={me.id} className="flex-1 text-[15px] font-medium" />
                   <span
                     className={cn(
                       "text-sm tabular-nums",
@@ -249,10 +304,12 @@ export function GroupScreen({ groupId }: { groupId: string }) {
                     key={`${t.from}-${t.to}`}
                     className="flex items-center gap-2 rounded-2xl border border-line bg-surface px-3 py-2.5 text-[15px]"
                   >
-                    <span className="truncate font-medium">{memberName(byId.get(t.from), me.id)}</span>
+                    <MemberName member={byId.get(t.from)} myId={me.id} className="font-medium" />
                     <ArrowRight className="size-4 shrink-0 text-subtle" aria-label="pays" />
-                    <span className="min-w-0 flex-1 truncate font-medium">{memberName(byId.get(t.to), me.id)}</span>
-                    <span className="font-semibold tabular-nums">{formatMoney(t.amount, currency)}</span>
+                    <MemberName member={byId.get(t.to)} myId={me.id} className="font-medium" />
+                    <span className="ml-auto shrink-0 font-semibold tabular-nums">
+                      {formatMoney(t.amount, currency)}
+                    </span>
                     <Button size="sm" variant="secondary" onClick={() => setSettling(t)}>
                       Record
                     </Button>
@@ -281,14 +338,15 @@ export function GroupScreen({ groupId }: { groupId: string }) {
       <Sheet
         open={editing.open}
         onOpenChange={(open) => setEditing((s) => ({ ...s, open }))}
-        title={editing.expense ? "Edit expense" : "Add group expense"}
+        title={editing.rule ? "Edit repeating expense" : editing.expense ? "Edit expense" : "Add group expense"}
       >
         <GroupExpenseForm
           key={editing.version}
           group={group}
-          members={[me, ...active.filter((m) => m.id !== me.id)]}
+          members={formMembers}
           me={me}
           expense={editing.expense}
+          rule={editing.rule}
           onDone={() => setEditing((s) => ({ ...s, open: false }))}
         />
       </Sheet>
@@ -359,7 +417,12 @@ function ExpenseItem({
       >
         <MemberAvatar id={expense.paid_by_member_id} name={payerName} className="size-11 text-base" />
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[15px] font-medium">{expense.description}</span>
+          <span className="flex items-center gap-1.5 text-[15px] font-medium">
+            <span className="truncate">{expense.description}</span>
+            {expense.recurring_rule_id && (
+              <Repeat className="size-3.5 shrink-0 text-muted" aria-label="Repeats every month" />
+            )}
+          </span>
           <span className="block truncate text-sm text-muted">
             {payer} paid {formatMoney(expense.amount_minor, expense.currency)}
           </span>

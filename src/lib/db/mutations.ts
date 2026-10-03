@@ -1,14 +1,17 @@
 import { toISODate } from "@/lib/dates";
 import { occurrenceAfter, type Frequency } from "@/lib/recurrence";
 import { extractTags } from "@/lib/tags";
+import { favouriteKey } from "@/lib/favourites";
 import { deterministicUUID } from "@/lib/uuid";
 import type {
   Budget,
   Category,
   Expense,
+  Favourite,
   Group,
   GroupExpense,
   GroupMember,
+  GroupRecurringRule,
   Kind,
   LocalDB,
   OutboxItem,
@@ -49,13 +52,22 @@ async function enqueue(
   if (rest.length) await db.outbox.bulkDelete(rest.map((item) => item.seq!));
 }
 
-type Row = Expense | Category | PaymentMethod | Budget | RecurringRule | GroupExpense | Settlement;
+type Row =
+  | Expense
+  | Category
+  | PaymentMethod
+  | Budget
+  | RecurringRule
+  | Favourite
+  | GroupExpense
+  | Settlement
+  | GroupRecurringRule;
 
-async function putRows(db: LocalDB, table: RowTable, rows: Row[]) {
+async function putRows(db: LocalDB, table: RowTable, rows: Row[], op: OutboxItem["op"] = "upsert") {
   await db.transaction("rw", db.table(table), db.outbox, async () => {
     for (const row of rows) {
       await db.table(table).put(row);
-      await enqueue(db, table, row.id, row);
+      await enqueue(db, table, row.id, row, op);
     }
   });
   requestSync();
@@ -253,6 +265,8 @@ export type ProfileChanges = Partial<
     | "notify_bills"
     | "notify_weekly"
     | "notify_groups"
+    | "notify_budgets"
+    | "notify_settle"
   >
 >;
 
@@ -427,8 +441,8 @@ export async function importExpenses(db: LocalDB, inputs: ExpenseInput[]) {
 
 async function putGroupRow(
   db: LocalDB,
-  table: "group_members" | "groups",
-  row: GroupMember | Group,
+  table: "group_members" | "groups" | "group_recurring_rules",
+  row: GroupMember | Group | GroupRecurringRule,
   changes: Record<string, unknown>,
   op: "insert" | "update",
 ) {
@@ -486,6 +500,7 @@ export async function saveGroupExpense(db: LocalDB, input: GroupExpenseInput, ex
         id: crypto.randomUUID(),
         ...input,
         description: input.description.trim(),
+        recurring_rule_id: null,
         created_by: db.userId,
         created_at: timestamp,
         updated_at: timestamp,
@@ -527,26 +542,28 @@ export async function deleteSettlement(db: LocalDB, settlement: Settlement, dele
 /**
  * Mirrors your share of each group expense as a personal expense (so budgets, Insights and
  * safe-to-spend count what's yours, not the whole bill you paid). Ids come from the group
- * expense, so devices agree; edits and deletions in the group follow through.
+ * expense, so devices agree; edits and deletions in the group follow through, unless you've
+ * edited or deleted your copy since. Deleting a group keeps the shares already mirrored.
  */
 export async function syncGroupShares(db: LocalDB, guessCategory: (description: string) => string | null) {
-  const myMembers = (await db.group_members.toArray()).filter((m) => m.user_id === db.userId && !m.deleted_at);
-  if (!myMembers.length) return 0;
-  const memberOf = new Map(myMembers.map((m) => [m.group_id, m.id]));
+  const myMembers = (await db.group_members.toArray()).filter((m) => m.user_id === db.userId);
+  // Groups you're in now. Your share there includes any earlier spot you left and rejoined from.
+  const myGroups = new Set(myMembers.filter((m) => !m.deleted_at).map((m) => m.group_id));
+  if (!myGroups.size) return 0;
+  const myMemberIds = new Set(myMembers.map((m) => m.id));
   const groups = new Map((await db.groups.toArray()).map((g) => [g.id, g]));
   const changed: Expense[] = [];
   const timestamp = now();
 
   for (const expense of await db.group_expenses.toArray()) {
-    const myMember = memberOf.get(expense.group_id);
     const group = groups.get(expense.group_id);
-    if (!myMember || !group) continue;
-    const share =
-      (expense.splits as { member_id: string; share_minor: number }[]).find((s) => s.member_id === myMember)
-        ?.share_minor ?? 0;
+    if (!myGroups.has(expense.group_id) || !group || group.deleted_at) continue;
+    const share = (expense.splits as { member_id: string; share_minor: number }[])
+      .filter((s) => myMemberIds.has(s.member_id))
+      .reduce((sum, s) => sum + s.share_minor, 0);
     const id = await deterministicUUID(`group-share:${expense.id}:${db.userId}`);
     const existing = await db.expenses.get(id);
-    const wanted = !expense.deleted_at && !group.deleted_at && share > 0;
+    const wanted = !expense.deleted_at && share > 0;
     const note = `${expense.description} · ${group.emoji} ${group.name}`.slice(0, 500);
 
     if (!wanted) {
@@ -570,12 +587,17 @@ export async function syncGroupShares(db: LocalDB, guessCategory: (description: 
       );
       continue;
     }
-    // Deleted by you: stays deleted unless the group expense changed afterwards.
-    // Compare as dates: server (+00:00) and local (Z) timestamps differ as strings.
-    const revived = existing.deleted_at && Date.parse(expense.updated_at) > Date.parse(existing.deleted_at);
-    if (existing.deleted_at && !revived) continue;
+    // Edited or deleted by you: stays that way unless the group expense changed afterwards
+    // (a renamed group only updates the note). Compare as dates: server (+00:00) and local (Z)
+    // timestamps differ as strings.
+    const mineAt = Date.parse(existing.updated_at);
+    if (Date.parse(expense.updated_at) <= mineAt) {
+      if (Date.parse(group.updated_at) > mineAt && !existing.deleted_at && existing.note !== note)
+        changed.push({ ...existing, note, tags: extractTags(note), updated_at: timestamp });
+      continue;
+    }
     if (
-      revived ||
+      existing.deleted_at ||
       existing.amount_minor !== share ||
       existing.spent_on !== expense.spent_on ||
       existing.note !== note ||
@@ -595,4 +617,173 @@ export async function syncGroupShares(db: LocalDB, guessCategory: (description: 
   }
   if (changed.length) await putRows(db, "expenses", changed);
   return changed.length;
+}
+
+// ---------------------------------------------------------------------------
+// Repeating group expenses (monthly rent split with flatmates)
+// ---------------------------------------------------------------------------
+
+const groupOccurrenceId = (ruleId: string, date: string) => deterministicUUID(`group-rule:${ruleId}:${date}`);
+
+async function groupOccurrence(rule: GroupRecurringRule, date: string, userId: string): Promise<GroupExpense> {
+  const timestamp = now();
+  return {
+    id: await groupOccurrenceId(rule.id, date),
+    group_id: rule.group_id,
+    paid_by_member_id: rule.paid_by_member_id,
+    amount_minor: rule.amount_minor,
+    currency: rule.currency,
+    description: rule.description,
+    spent_on: date,
+    split_mode: rule.split_mode,
+    splits: rule.splits,
+    recurring_rule_id: rule.id,
+    created_by: userId,
+    created_at: timestamp,
+    updated_at: timestamp,
+    deleted_at: null,
+  };
+}
+
+/** Adds a group expense that repeats every month: this one now, then one on the same day each month. */
+export async function createRepeatingGroupExpense(db: LocalDB, input: GroupExpenseInput): Promise<GroupExpense> {
+  const timestamp = now();
+  const schedule = { frequency: "monthly", interval: 1, anchor_date: input.spent_on };
+  const rule: GroupRecurringRule = {
+    id: crypto.randomUUID(),
+    group_id: input.group_id,
+    paid_by_member_id: input.paid_by_member_id,
+    amount_minor: input.amount_minor,
+    currency: input.currency,
+    description: input.description.trim(),
+    split_mode: input.split_mode,
+    splits: input.splits,
+    ...schedule,
+    next_due_on: occurrenceAfter(schedule, input.spent_on),
+    is_active: true,
+    created_by: db.userId,
+    created_at: timestamp,
+    updated_at: timestamp,
+    deleted_at: null,
+  };
+  // Rule first: the outbox pushes in order, and the expense references it.
+  await putRows(db, "group_recurring_rules", [rule]);
+  const first = await groupOccurrence(rule, input.spent_on, db.userId);
+  await putRows(db, "group_expenses", [first], "create");
+  await addDueGroupOccurrences(db); // a start date months ago already has due months
+  return first;
+}
+
+export type GroupRuleChanges = Partial<
+  Pick<
+    GroupRecurringRule,
+    "paid_by_member_id" | "amount_minor" | "description" | "split_mode" | "splits" | "is_active" | "deleted_at"
+  >
+>;
+
+/** Changes apply to months still to come; ones already added stay as they are. */
+export async function updateGroupRule(db: LocalDB, rule: GroupRecurringRule, changes: GroupRuleChanges) {
+  await putGroupRow(db, "group_recurring_rules", { ...rule, ...changes, updated_at: now() }, changes, "update");
+}
+
+let addingGroupOccurrences = false;
+
+/**
+ * Called after each sync: adds the months that have come due for repeating expenses in your
+ * groups. Every member's app does this; the (rule, date) ids and "create" (insert if missing)
+ * mean a month is added once, and one somebody deleted stays deleted.
+ */
+export async function addDueGroupOccurrences(db: LocalDB, today = new Date()) {
+  if (addingGroupOccurrences) return 0;
+  addingGroupOccurrences = true;
+  try {
+    const todayISO = localISO(today);
+    const myGroups = new Set(
+      (await db.group_members.toArray()).filter((m) => m.user_id === db.userId && !m.deleted_at).map((m) => m.group_id),
+    );
+    const liveGroups = new Set((await db.groups.toArray()).filter((g) => !g.deleted_at).map((g) => g.id));
+    let added = 0;
+    for (const rule of await db.group_recurring_rules.toArray()) {
+      if (!rule.is_active || rule.deleted_at || !myGroups.has(rule.group_id) || !liveGroups.has(rule.group_id))
+        continue;
+      const created: GroupExpense[] = [];
+      let due = rule.next_due_on;
+      while (due <= todayISO && created.length < 24) {
+        const occurrence = await groupOccurrence(rule, due, db.userId);
+        if (!(await db.group_expenses.get(occurrence.id))) created.push(occurrence);
+        due = occurrenceAfter(rule, due);
+      }
+      if (due === rule.next_due_on) continue;
+      if (created.length) await putRows(db, "group_expenses", created, "create");
+      await putGroupRow(
+        db,
+        "group_recurring_rules",
+        { ...rule, next_due_on: due, updated_at: now() },
+        { next_due_on: due },
+        "update",
+      );
+      added += created.length;
+    }
+    return added;
+  } finally {
+    addingGroupOccurrences = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Favourites
+// ---------------------------------------------------------------------------
+
+export type FavouriteInput = Pick<
+  Favourite,
+  "amount_minor" | "currency" | "category_id" | "payment_method_id" | "note"
+>;
+
+/** Pins a spend to Home. Pinning the same amount + category + note twice keeps the first. */
+export async function addFavourite(db: LocalDB, input: FavouriteInput): Promise<Favourite> {
+  const pinned = (await db.favourites.toArray()).filter((f) => !f.deleted_at);
+  const same = pinned.find((f) => favouriteKey(f) === favouriteKey(input));
+  if (same) return same;
+  const timestamp = now();
+  // Only these fields: a suggestion passed in also carries `count`, which isn't a column.
+  const favourite: Favourite = {
+    id: crypto.randomUUID(),
+    user_id: db.userId,
+    amount_minor: input.amount_minor,
+    currency: input.currency,
+    category_id: input.category_id,
+    payment_method_id: input.payment_method_id,
+    note: input.note?.trim() || null,
+    sort_order: Math.max(-1, ...pinned.map((f) => f.sort_order)) + 1,
+    created_at: timestamp,
+    updated_at: timestamp,
+    deleted_at: null,
+  };
+  await putRows(db, "favourites", [favourite]);
+  return favourite;
+}
+
+export async function removeFavourite(db: LocalDB, favourite: Favourite, removed = true) {
+  await putRows(db, "favourites", [{ ...favourite, deleted_at: removed ? now() : null, updated_at: now() }]);
+}
+
+/** Saves a new order (the list as the user arranged it). */
+export async function reorderFavourites(db: LocalDB, ordered: Favourite[]) {
+  const changed = ordered
+    .map((f, index) => ({ ...f, sort_order: index }))
+    .filter((f, index) => ordered[index].sort_order !== f.sort_order)
+    .map((f) => ({ ...f, updated_at: now() }));
+  if (changed.length) await putRows(db, "favourites", changed);
+}
+
+/** One tap: logs the favourite as today's expense. */
+export async function logFavourite(db: LocalDB, favourite: Favourite) {
+  return createExpense(db, {
+    amount_minor: favourite.amount_minor,
+    currency: favourite.currency,
+    category_id: favourite.category_id,
+    payment_method_id: favourite.payment_method_id,
+    note: favourite.note,
+    spent_on: localISO(new Date()),
+  });
 }

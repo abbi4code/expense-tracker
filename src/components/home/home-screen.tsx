@@ -30,6 +30,7 @@ import { useCurrentPeriod } from "@/lib/use-period";
 import { cn } from "@/lib/utils";
 import { StreakChip } from "@/components/app/streak-chip";
 import { DueBills, UpcomingBills } from "./bills";
+import { FavouritesRow } from "./favourites";
 import { ClaimCard } from "./claim-card";
 import { QuickAdd } from "./quick-add";
 import { InstallCard } from "./install-card";
@@ -110,10 +111,7 @@ export function HomeScreen() {
                 {safe.upcoming > 0 && <> after {formatMoney(safe.upcoming, currency)} of bills</>}
               </>
             ) : (
-              <>
-                You have used this month<>Budget used up. Every rupee now goes over, so take it easy.</>apos;s budget.
-                Anything more goes over.
-              </>
+              <>You&apos;ve used this month&apos;s budget. Anything more goes over, so take it easy.</>
             )}
           </p>
         )}
@@ -201,6 +199,7 @@ export function HomeScreen() {
       </Card>
 
       <QuickAdd />
+      <FavouritesRow />
       <DueBills rules={rules} today={today} />
       <ClaimCard />
       <InstallCard />

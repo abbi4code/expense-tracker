@@ -11,6 +11,8 @@ export type Group = Tables<"groups">;
 export type GroupMember = Tables<"group_members">;
 export type GroupExpense = Tables<"group_expenses">;
 export type Settlement = Tables<"settlements">;
+export type Favourite = Tables<"favourites">;
+export type GroupRecurringRule = Tables<"group_recurring_rules">;
 export type Kind = "expense" | "income";
 
 /** Rows synced before Phase 2 have no `kind`/`tags` until they're next pulled. */
@@ -27,10 +29,12 @@ export type RowTable =
   | "payment_methods"
   | "budgets"
   | "recurring_rules"
+  | "favourites"
   | "groups"
   | "group_members"
   | "group_expenses"
-  | "settlements";
+  | "settlements"
+  | "group_recurring_rules";
 export type SyncTable = RowTable | "profiles";
 
 export type OutboxItem = {
@@ -41,8 +45,10 @@ export type OutboxItem = {
   /**
    * How to write it. Default "upsert" (whole rows). Group and member rows can't be upserted under
    * their RLS rules, so they use "insert" (new named member) or "update" (partial changes).
+   * "create" inserts only if the row doesn't exist yet (repeating group expenses: a month another
+   * member already added, or deleted, is left as it is).
    */
-  op?: "upsert" | "insert" | "update";
+  op?: "upsert" | "insert" | "update" | "create";
   /** Bumped each time a newer change is merged in, so a push never deletes a change it didn't send. */
   version?: number;
 };
@@ -65,6 +71,8 @@ export class LocalDB extends Dexie {
   group_members!: EntityTable<GroupMember, "id">;
   group_expenses!: EntityTable<GroupExpense, "id">;
   settlements!: EntityTable<Settlement, "id">;
+  favourites!: EntityTable<Favourite, "id">;
+  group_recurring_rules!: EntityTable<GroupRecurringRule, "id">;
   outbox!: EntityTable<OutboxItem, "seq">;
   meta!: EntityTable<Meta, "key">;
 
@@ -85,6 +93,7 @@ export class LocalDB extends Dexie {
       group_expenses: "id, group_id",
       settlements: "id, group_id",
     });
+    this.version(4).stores({ favourites: "id", group_recurring_rules: "id, group_id" });
   }
 }
 

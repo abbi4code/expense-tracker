@@ -5,6 +5,7 @@ import { useMemo } from "react";
 import { useData } from "@/components/data/data-provider";
 import { addDays, todayISO } from "@/lib/dates";
 import { fromMinor } from "@/lib/money";
+import { favouriteSuggestions } from "@/lib/favourites";
 import { memberBalances, simplifyDebts } from "@/lib/splits";
 import { countsAsSpending, kindOf, type Category, type Expense, type Kind } from "./local";
 
@@ -91,6 +92,25 @@ export function useRecentExpenses(limit: number, kind: Kind = "expense") {
 export function useExpenseCount() {
   const { db } = useData();
   return useLiveQuery(() => db.expenses.filter((e) => !e.deleted_at).count(), [db]);
+}
+
+/** Pinned favourites in the user's order. */
+export function useFavourites() {
+  const { db } = useData();
+  return useLiveQuery(async () => (await db.favourites.toArray()).filter((f) => !f.deleted_at).sort(byOrder), [db]);
+}
+
+/** Repeat spends from the last 90 days worth pinning (not pinned yet). */
+export function useFavouriteSuggestions() {
+  const { db } = useData();
+  return useLiveQuery(async () => {
+    const since = addDays(todayISO(), -90);
+    const [recent, pinned] = await Promise.all([
+      db.expenses.where("spent_on").aboveOrEqual(since).toArray(),
+      db.favourites.toArray(),
+    ]);
+    return favouriteSuggestions(recent, pinned);
+  }, [db]);
 }
 
 export type CategoryUsage = { count: number; lastUsed: string };
@@ -306,10 +326,11 @@ export function useGroupDetail(groupId: string) {
   return useLiveQuery(async () => {
     const group = await db.groups.get(groupId);
     if (!group) return null;
-    const [members, expenses, settlements] = await Promise.all([
+    const [members, expenses, settlements, rules] = await Promise.all([
       db.group_members.where("group_id").equals(groupId).toArray(),
       db.group_expenses.where("group_id").equals(groupId).toArray(),
       db.settlements.where("group_id").equals(groupId).toArray(),
+      db.group_recurring_rules.where("group_id").equals(groupId).toArray(),
     ]);
     const balances = memberBalances(expenses, settlements);
     const byNewestDay = <T extends { spent_on: string; created_at: string }>(a: T, b: T) =>
@@ -330,6 +351,8 @@ export function useGroupDetail(groupId: string) {
       settlements: settlements.filter((s) => !s.deleted_at).sort(byNewestDay),
       balances,
       transfers: simplifyDebts(balances),
+      // Repeating expenses (rent…), paused ones included, next due first.
+      rules: rules.filter((r) => !r.deleted_at).sort((a, b) => a.next_due_on.localeCompare(b.next_due_on)),
     };
   }, [db, groupId]);
 }

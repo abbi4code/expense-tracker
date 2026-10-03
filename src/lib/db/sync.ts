@@ -3,8 +3,15 @@ import type { Database } from "@/lib/supabase/database.types";
 import type { Group, GroupMember, LocalDB, OutboxItem, RowTable } from "./local";
 
 // Parents before children, so a fresh device never holds an expense whose category is missing.
-const ROW_TABLES: RowTable[] = ["categories", "payment_methods", "recurring_rules", "budgets", "expenses"];
-const GROUP_ROW_TABLES: RowTable[] = ["group_expenses", "settlements"];
+const ROW_TABLES: RowTable[] = [
+  "categories",
+  "payment_methods",
+  "recurring_rules",
+  "budgets",
+  "favourites",
+  "expenses",
+];
+const GROUP_ROW_TABLES: RowTable[] = ["group_recurring_rules", "group_expenses", "settlements"];
 
 type Fetched = { table: RowTable; rows: { id: string; updated_at: string }[]; latest: string | undefined };
 const PAGE_SIZE = 1000;
@@ -113,6 +120,9 @@ export class SyncEngine {
           // Rejected for good (e.g. invalid data): drop it and restore the server's copy.
           await this.refetch(item);
           this.onRejected(item, "A change couldn't be saved and was undone.");
+        } else if (item.op === "create" && !result.row) {
+          // Already on the server (maybe deleted there): keep the server's copy, not ours.
+          await this.refetch(item);
         }
       }
     }
@@ -136,7 +146,7 @@ export class SyncEngine {
               .select()
               .maybeSingle()
           : await table
-              .upsert(payload as never)
+              .upsert(payload as never, { ignoreDuplicates: op === "create" })
               .select()
               .maybeSingle();
 
@@ -203,10 +213,16 @@ export class SyncEngine {
     const groupIds = new Set(groups.map((g) => g.id));
     await this.db.transaction(
       "rw",
-      [this.db.groups, this.db.group_members, this.db.group_expenses, this.db.settlements],
+      [
+        this.db.groups,
+        this.db.group_members,
+        this.db.group_expenses,
+        this.db.settlements,
+        this.db.group_recurring_rules,
+      ],
       async () => {
         const stale = async (
-          table: "groups" | "group_members" | "group_expenses" | "settlements",
+          table: "groups" | "group_members" | "group_expenses" | "settlements" | "group_recurring_rules",
           keep: (row: { id: string; group_id?: string }) => boolean,
         ) => {
           const rows = (await this.db.table(table).toArray()) as { id: string; group_id?: string }[];
@@ -217,6 +233,7 @@ export class SyncEngine {
         await stale("group_members", (r) => memberIds.has(r.id));
         await stale("group_expenses", (r) => groupIds.has(r.group_id!));
         await stale("settlements", (r) => groupIds.has(r.group_id!));
+        await stale("group_recurring_rules", (r) => groupIds.has(r.group_id!));
         await this.db.groups.bulkPut(groups.filter((g) => !pending.has(g.id)));
         await this.db.group_members.bulkPut(members.filter((m) => !pending.has(m.id)));
       },

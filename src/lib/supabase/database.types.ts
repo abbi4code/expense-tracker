@@ -193,6 +193,63 @@ export type Database = {
           },
         ];
       };
+      favourites: {
+        Row: {
+          amount_minor: number;
+          category_id: string;
+          created_at: string;
+          currency: string;
+          deleted_at: string | null;
+          id: string;
+          note: string | null;
+          payment_method_id: string | null;
+          sort_order: number;
+          updated_at: string;
+          user_id: string;
+        };
+        Insert: {
+          amount_minor: number;
+          category_id: string;
+          created_at?: string;
+          currency: string;
+          deleted_at?: string | null;
+          id?: string;
+          note?: string | null;
+          payment_method_id?: string | null;
+          sort_order?: number;
+          updated_at?: string;
+          user_id?: string;
+        };
+        Update: {
+          amount_minor?: number;
+          category_id?: string;
+          created_at?: string;
+          currency?: string;
+          deleted_at?: string | null;
+          id?: string;
+          note?: string | null;
+          payment_method_id?: string | null;
+          sort_order?: number;
+          updated_at?: string;
+          user_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "favourites_category_id_user_id_fkey";
+            columns: ["category_id", "user_id"];
+            isOneToOne: false;
+            referencedRelation: "categories";
+            referencedColumns: ["id", "user_id"];
+          },
+          {
+            foreignKeyName: "favourites_payment_method_id_user_id_fkey";
+            columns: ["payment_method_id", "user_id"];
+            isOneToOne: false;
+            referencedRelation: "payment_methods";
+            referencedColumns: ["id", "user_id"];
+          },
+        ];
+      };
       group_expenses: {
         Row: {
           amount_minor: number;
@@ -204,6 +261,7 @@ export type Database = {
           group_id: string;
           id: string;
           paid_by_member_id: string;
+          recurring_rule_id: string | null;
           spent_on: string;
           split_mode: string;
           splits: Json;
@@ -219,6 +277,7 @@ export type Database = {
           group_id: string;
           id?: string;
           paid_by_member_id: string;
+          recurring_rule_id?: string | null;
           spent_on?: string;
           split_mode?: string;
           splits: Json;
@@ -234,6 +293,7 @@ export type Database = {
           group_id?: string;
           id?: string;
           paid_by_member_id?: string;
+          recurring_rule_id?: string | null;
           spent_on?: string;
           split_mode?: string;
           splits?: Json;
@@ -252,6 +312,13 @@ export type Database = {
             columns: ["paid_by_member_id", "group_id"];
             isOneToOne: false;
             referencedRelation: "group_members";
+            referencedColumns: ["id", "group_id"];
+          },
+          {
+            foreignKeyName: "group_expenses_recurring_rule_id_group_id_fkey";
+            columns: ["recurring_rule_id", "group_id"];
+            isOneToOne: false;
+            referencedRelation: "group_recurring_rules";
             referencedColumns: ["id", "group_id"];
           },
         ];
@@ -297,6 +364,81 @@ export type Database = {
             isOneToOne: false;
             referencedRelation: "groups";
             referencedColumns: ["id"];
+          },
+        ];
+      };
+      group_recurring_rules: {
+        Row: {
+          amount_minor: number;
+          anchor_date: string;
+          created_at: string;
+          created_by: string | null;
+          currency: string;
+          deleted_at: string | null;
+          description: string;
+          frequency: string;
+          group_id: string;
+          id: string;
+          interval: number;
+          is_active: boolean;
+          next_due_on: string;
+          paid_by_member_id: string;
+          split_mode: string;
+          splits: Json;
+          updated_at: string;
+        };
+        Insert: {
+          amount_minor: number;
+          anchor_date: string;
+          created_at?: string;
+          created_by?: string | null;
+          currency: string;
+          deleted_at?: string | null;
+          description: string;
+          frequency?: string;
+          group_id: string;
+          id?: string;
+          interval?: number;
+          is_active?: boolean;
+          next_due_on: string;
+          paid_by_member_id: string;
+          split_mode?: string;
+          splits: Json;
+          updated_at?: string;
+        };
+        Update: {
+          amount_minor?: number;
+          anchor_date?: string;
+          created_at?: string;
+          created_by?: string | null;
+          currency?: string;
+          deleted_at?: string | null;
+          description?: string;
+          frequency?: string;
+          group_id?: string;
+          id?: string;
+          interval?: number;
+          is_active?: boolean;
+          next_due_on?: string;
+          paid_by_member_id?: string;
+          split_mode?: string;
+          splits?: Json;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "group_recurring_rules_group_id_fkey";
+            columns: ["group_id"];
+            isOneToOne: false;
+            referencedRelation: "groups";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "group_recurring_rules_paid_by_member_id_group_id_fkey";
+            columns: ["paid_by_member_id", "group_id"];
+            isOneToOne: false;
+            referencedRelation: "group_members";
+            referencedColumns: ["id", "group_id"];
           },
         ];
       };
@@ -402,9 +544,11 @@ export type Database = {
           locale: string | null;
           month_start_day: number;
           notify_bills: boolean;
+          notify_budgets: boolean;
           notify_daily: boolean;
           notify_daily_hour: number;
           notify_groups: boolean;
+          notify_settle: boolean;
           notify_weekly: boolean;
           onboarded_at: string | null;
           show_payment_method: boolean;
@@ -422,9 +566,11 @@ export type Database = {
           locale?: string | null;
           month_start_day?: number;
           notify_bills?: boolean;
+          notify_budgets?: boolean;
           notify_daily?: boolean;
           notify_daily_hour?: number;
           notify_groups?: boolean;
+          notify_settle?: boolean;
           notify_weekly?: boolean;
           onboarded_at?: string | null;
           show_payment_method?: boolean;
@@ -442,9 +588,11 @@ export type Database = {
           locale?: string | null;
           month_start_day?: number;
           notify_bills?: boolean;
+          notify_budgets?: boolean;
           notify_daily?: boolean;
           notify_daily_hour?: number;
           notify_groups?: boolean;
+          notify_settle?: boolean;
           notify_weekly?: boolean;
           onboarded_at?: string | null;
           show_payment_method?: boolean;
@@ -649,6 +797,7 @@ export type Database = {
       delete_account: { Args: never; Returns: undefined };
       group_preview: { Args: { p_code: string }; Returns: Json };
       is_group_member: { Args: { target_group: string }; Returns: boolean };
+      is_group_owner: { Args: { target_group: string }; Returns: boolean };
       join_group: {
         Args: { p_code: string; p_display_name?: string; p_member_id?: string };
         Returns: string;

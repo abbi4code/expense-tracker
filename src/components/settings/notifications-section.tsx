@@ -1,6 +1,6 @@
 "use client";
 
-import { Bell, BellRing, CalendarClock, Clock, Receipt, Users } from "lucide-react";
+import { Bell, BellRing, CalendarClock, Clock, Gauge, HandCoins, Receipt, Users } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useData } from "@/components/data/data-provider";
@@ -121,6 +121,18 @@ export function NotificationsSection() {
             }
           />
           <SettingsRow
+            icon={icon(Gauge)}
+            label="Budget alerts"
+            hint="At 80% and 100% of a budget, 9am to 9pm"
+            trailing={
+              <Switch
+                label="Budget alerts"
+                checked={profile.notify_budgets}
+                onChange={(on) => updateProfile(db, { notify_budgets: on })}
+              />
+            }
+          />
+          <SettingsRow
             icon={icon(Users)}
             label="Group activity"
             hint="When friends add expenses you're part of"
@@ -129,6 +141,18 @@ export function NotificationsSection() {
                 label="Group activity"
                 checked={profile.notify_groups}
                 onChange={(on) => updateProfile(db, { notify_groups: on })}
+              />
+            }
+          />
+          <SettingsRow
+            icon={icon(HandCoins)}
+            label="Settle-up reminders"
+            hint="When you've owed someone for 2 weeks, weekly"
+            trailing={
+              <Switch
+                label="Settle-up reminders"
+                checked={profile.notify_settle}
+                onChange={(on) => updateProfile(db, { notify_settle: on })}
               />
             }
           />

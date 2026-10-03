@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { addDays } from "@/lib/dates";
+import { addDays, periodContaining } from "@/lib/dates";
 import {
   BILLS_HOUR,
   RECAP_HOUR,
@@ -11,13 +11,15 @@ import {
   weeklyRecap,
 } from "@/lib/push/schedule";
 import { formatMoney } from "@/lib/money";
+import { BUDGET_ALERT_HOURS, SETTLE_HOUR, budgetAlerts, settleReminder } from "@/lib/push/alerts";
 import { sendToSubscriptions, type PushMessage } from "@/lib/push/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
  * The notification scheduler. Call it hourly (see README) with `Authorization: Bearer $CRON_SECRET`.
  * For each user with a subscribed device it checks their local hour and sends, at most once each:
- * the daily reminder (nothing logged yet), bills due today/tomorrow (9am), and the Sunday recap (7pm).
+ * the daily reminder (nothing logged yet), bills due today/tomorrow (9am), the Sunday recap (7pm),
+ * budget alerts at 80%/100% (9am–9pm) and settle-up reminders after two weeks of owing (10am).
  * `?dryRun=1` reports what would be sent without sending or logging. `?now=<ISO>` overrides the clock (testing).
  */
 export async function GET(request: NextRequest) {
@@ -39,7 +41,9 @@ export async function GET(request: NextRequest) {
 
   const { data: profiles } = await admin
     .from("profiles")
-    .select("id, timezone, currency, notify_daily, notify_daily_hour, notify_bills, notify_weekly, notify_groups")
+    .select(
+      "id, timezone, currency, month_start_day, notify_daily, notify_daily_hour, notify_bills, notify_weekly, notify_groups, notify_budgets, notify_settle",
+    )
     .in("id", [...byUser.keys()]);
 
   const report: { user: string; kind: string; message: PushMessage; delivered: number }[] = [];
@@ -47,7 +51,8 @@ export async function GET(request: NextRequest) {
   for (const profile of profiles ?? []) {
     const { date, hour, weekday } = localTime(now, validTimeZone(profile.timezone));
     const currency = profile.currency ?? "INR";
-    const due: { kind: string; message: PushMessage }[] = [];
+    // `key` makes each one once-only in notification_log (default: once per day).
+    const due: { kind: string; message: PushMessage; key?: string }[] = [];
 
     if (profile.notify_daily && hour === profile.notify_daily_hour) {
       const { count } = await admin
@@ -91,6 +96,85 @@ export async function GET(request: NextRequest) {
         (rows ?? []).filter((r) => r.spent_on >= from && r.spent_on <= to).reduce((s, r) => s + r.amount_minor, 0);
       const message = weeklyRecap(sum(weekStart, date), sum(addDays(date, -13), addDays(date, -7)), currency);
       if (message) due.push({ kind: "weekly", message });
+    }
+
+    if (profile.notify_budgets && hour >= BUDGET_ALERT_HOURS.from && hour < BUDGET_ALERT_HOURS.to) {
+      const period = periodContaining(date, profile.month_start_day);
+      const [{ data: budgets }, { data: spent }, { data: categories }, { data: logged }] = await Promise.all([
+        admin.from("budgets").select("id, category_id, amount_minor").eq("user_id", profile.id).is("deleted_at", null),
+        admin
+          .from("expenses")
+          .select("amount_minor, category_id")
+          .eq("user_id", profile.id)
+          .eq("kind", "expense")
+          .eq("reimbursable", false)
+          .is("deleted_at", null)
+          .gte("spent_on", period.start)
+          .lt("spent_on", period.end),
+        admin.from("categories").select("id, name, emoji").eq("user_id", profile.id),
+        admin
+          .from("notification_log")
+          .select("key")
+          .eq("user_id", profile.id)
+          .eq("kind", "budget")
+          .like("key", `%:${period.start}:%`),
+      ]);
+      if (budgets?.length) {
+        const spentByCategory = new Map<string, number>();
+        for (const e of spent ?? [])
+          spentByCategory.set(e.category_id, (spentByCategory.get(e.category_id) ?? 0) + e.amount_minor);
+        for (const alert of budgetAlerts({
+          budgets,
+          spentByCategory,
+          categories: categories ?? [],
+          period,
+          today: date,
+          currency,
+          sent: new Set((logged ?? []).map((l) => l.key)),
+        }))
+          due.push({ kind: "budget", ...alert });
+      }
+    }
+
+    if (profile.notify_settle && hour === SETTLE_HOUR) {
+      const { data: spots } = await admin
+        .from("group_members")
+        .select("id, group_id, deleted_at")
+        .eq("user_id", profile.id);
+      const groupIds = [...new Set((spots ?? []).filter((m) => !m.deleted_at).map((m) => m.group_id))];
+      if (groupIds.length) {
+        const [{ data: groups }, { data: members }, { data: expenses }, { data: settlements }, { data: logged }] =
+          await Promise.all([
+            admin.from("groups").select("id, name, emoji, currency").in("id", groupIds).is("deleted_at", null),
+            admin.from("group_members").select("id, group_id, display_name").in("group_id", groupIds),
+            admin
+              .from("group_expenses")
+              .select("group_id, created_at, paid_by_member_id, amount_minor, splits")
+              .in("group_id", groupIds)
+              .is("deleted_at", null),
+            admin
+              .from("settlements")
+              .select("group_id, created_at, from_member_id, to_member_id, amount_minor")
+              .in("group_id", groupIds)
+              .is("deleted_at", null),
+            admin.from("notification_log").select("key").eq("user_id", profile.id).eq("kind", "settle"),
+          ]);
+        const sent = new Set((logged ?? []).map((l) => l.key));
+        for (const group of groups ?? []) {
+          const reminder = settleReminder({
+            group,
+            members: (members ?? []).filter((m) => m.group_id === group.id),
+            // Every spot you've held here (you may have left and rejoined).
+            memberIds: new Set((spots ?? []).filter((m) => m.group_id === group.id).map((m) => m.id)),
+            expenses: (expenses ?? []).filter((e) => e.group_id === group.id),
+            settlements: (settlements ?? []).filter((x) => x.group_id === group.id),
+            currency: group.currency,
+            now,
+            sent,
+          });
+          if (reminder) due.push({ kind: "settle", ...reminder });
+        }
+      }
     }
 
     // Group activity: expenses others added recently in your groups (any hour), once per expense.
@@ -155,13 +239,15 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    for (const { kind, message } of due) {
+    for (const { kind, message, key } of due) {
       if (dryRun) {
         report.push({ user: profile.id, kind, message, delivered: 0 });
         continue;
       }
       // The log's primary key makes each reminder once-only, even if the scheduler runs twice.
-      const { error: logError } = await admin.from("notification_log").insert({ user_id: profile.id, kind, key: date });
+      const { error: logError } = await admin
+        .from("notification_log")
+        .insert({ user_id: profile.id, kind, key: key ?? date });
       if (logError) continue; // already sent
       const delivered = await sendToSubscriptions(admin, byUser.get(profile.id) ?? [], message);
       report.push({ user: profile.id, kind, message, delivered });

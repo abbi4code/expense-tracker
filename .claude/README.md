@@ -24,6 +24,7 @@ Read in this order:
 - [x] Phase 2: see "Built" notes in phase-2-budgets-insights.md
 - [x] Phase 3: see "Built" notes in phase-3-habits-and-smart-input.md
 - [x] Phase 4: see "Built" notes in phase-4-shared-expenses.md
+- [ ] Phase 5 (in progress): see "Built" notes in phase-5-backlog.md
 
 ## Rules of thumb for every phase
 

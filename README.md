@@ -56,6 +56,7 @@ Then in the dashboard (these live in `supabase/config.toml` locally but are **no
 | `npm run dev` | Dev server (service worker disabled; `NEXT_PUBLIC_SW_IN_DEV=1` to enable) |
 | `npm run build && npm start` | Production build, with the service worker on |
 | `npm run lint` | ESLint |
+| `npm test` / `npm run test:e2e` | Unit tests / phone-sized browser tests against the local Supabase (see [`tests/README.md`](tests/README.md)) |
 | `npm run db:types` | Regenerate `src/lib/supabase/database.types.ts` from the local DB |
 | `npm run db:link` / `npm run db:push` | Link the hosted project / push migrations to it |
 | `npm run tunnel` | Public HTTPS URL for localhost:3000 (Cloudflare quick tunnel) |
@@ -82,6 +83,11 @@ Then in the dashboard (these live in `supabase/config.toml` locally but are **no
    (Or any external cron, e.g. cron-job.org, hitting the same URL with that header.)
 3. Try it: `curl -H "Authorization: Bearer $CRON_SECRET" "https://YOUR-APP-DOMAIN/api/notifications/run?dryRun=1"`
    shows what would be sent without sending.
+
+What it sends, each at most once (per user, in their time zone; each can be switched off in Settings):
+daily log reminder, bills due (9am), Sunday recap (7pm), group activity, budget alerts at 80% / 100%
+(9am–9pm), and settle-up reminders after two weeks of owing (10am, weekly). `?now=<ISO>` overrides the
+clock for testing.
 
 iPhone: notifications only work in the installed home-screen app (iOS 16.4+).
 

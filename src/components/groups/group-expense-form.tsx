@@ -1,18 +1,20 @@
 "use client";
 
-import { Trash2 } from "lucide-react";
+import { Repeat, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { useData } from "@/components/data/data-provider";
 import { AmountInput, parseAmount } from "@/components/ui/amount-input";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
-import { addDays, todayISO } from "@/lib/dates";
-import type { Group, GroupExpense, GroupMember } from "@/lib/db/local";
-import { deleteGroupExpense, saveGroupExpense } from "@/lib/db/mutations";
+import { Switch } from "@/components/ui/switch";
+import { addDays, relativeDayLabel, todayISO } from "@/lib/dates";
+import type { Group, GroupExpense, GroupMember, GroupRecurringRule } from "@/lib/db/local";
+import { createRepeatingGroupExpense, deleteGroupExpense, saveGroupExpense, updateGroupRule } from "@/lib/db/mutations";
 import { formatMoney, fromMinor, toMinor } from "@/lib/money";
-import { computeSplits, type Split, type SplitMode } from "@/lib/splits";
+import { computeSplits, evenPercentages, type Split, type SplitMode } from "@/lib/splits";
 import { cn } from "@/lib/utils";
+import { memberLabel } from "./format";
 import { MemberAvatar } from "./member-avatar";
 
 const MODES: { mode: SplitMode; label: string }[] = [
@@ -24,14 +26,21 @@ const MODES: { mode: SplitMode; label: string }[] = [
 
 type GroupExpenseFormProps = {
   group: Group;
+  /** You first, then everyone else to choose from (incl. people who left, when editing their expense). */
   members: GroupMember[];
   me: GroupMember;
   expense: GroupExpense | null;
+  /** Editing a repeating expense (rent…): changes apply to the months still to come. */
+  rule?: GroupRecurringRule | null;
   onDone: () => void;
 };
 
-/** Initial per-member inputs for each mode, from an existing expense when editing. */
-function initialValues(expense: GroupExpense | null, members: GroupMember[], currency: string) {
+/** Initial per-member inputs for each mode, from an existing expense (or repeating one) when editing. */
+function initialValues(
+  expense: Pick<GroupExpense, "splits" | "split_mode"> | null,
+  members: GroupMember[],
+  currency: string,
+) {
   const splits = (expense?.splits as Split[] | undefined) ?? [];
   const byMember = new Map(splits.map((s) => [s.member_id, s]));
   const mode = (expense?.split_mode as SplitMode | undefined) ?? "equal";
@@ -46,30 +55,29 @@ function initialValues(expense: GroupExpense | null, members: GroupMember[], cur
   );
 }
 
-export function GroupExpenseForm({ group, members, me, expense, onDone }: GroupExpenseFormProps) {
+export function GroupExpenseForm({ group, members, me, expense, rule = null, onDone }: GroupExpenseFormProps) {
   const { db } = useData();
-  const currency = expense?.currency ?? group.currency;
-  const [description, setDescription] = useState(expense?.description ?? "");
-  const [amountText, setAmountText] = useState(expense ? String(fromMinor(expense.amount_minor, currency)) : "");
-  const [paidBy, setPaidBy] = useState(expense?.paid_by_member_id ?? me.id);
-  const [mode, setMode] = useState<SplitMode>((expense?.split_mode as SplitMode) ?? "equal");
-  const [values, setValues] = useState<Record<string, string>>(() => initialValues(expense, members, currency));
+  const source = expense ?? rule;
+  const currency = source?.currency ?? group.currency;
+  const [description, setDescription] = useState(source?.description ?? "");
+  const [amountText, setAmountText] = useState(source ? String(fromMinor(source.amount_minor, currency)) : "");
+  const [paidBy, setPaidBy] = useState(source?.paid_by_member_id ?? me.id);
+  const [mode, setMode] = useState<SplitMode>((source?.split_mode as SplitMode) ?? "equal");
+  const [values, setValues] = useState<Record<string, string>>(() => initialValues(source, members, currency));
   const [spentOn, setSpentOn] = useState(expense?.spent_on ?? todayISO());
+  const [repeats, setRepeats] = useState(false);
 
   const amountMinor = toMinor(parseAmount(amountText) ?? 0, currency);
 
   function switchMode(next: SplitMode) {
     setMode(next);
     // Sensible starting values: everyone in, even percentages, 1 share each, empty exact amounts.
+    const percents = evenPercentages(members.length);
     setValues(
       Object.fromEntries(
-        members.map((m) => [
+        members.map((m, i) => [
           m.id,
-          next === "equal" || next === "shares"
-            ? "1"
-            : next === "percent"
-              ? String(Math.round((100 / members.length) * 100) / 100)
-              : "",
+          next === "equal" || next === "shares" ? "1" : next === "percent" ? String(percents[i]) : "",
         ]),
       ),
     );
@@ -104,26 +112,57 @@ export function GroupExpenseForm({ group, members, me, expense, onDone }: GroupE
   async function save() {
     if (!description.trim()) return toast.error("What was it for?");
     if (!result.splits || !amountMinor) return toast.error(hint.text);
-    const saved = await saveGroupExpense(
-      db,
-      {
-        group_id: group.id,
+    const input = {
+      group_id: group.id,
+      paid_by_member_id: paidBy,
+      amount_minor: amountMinor,
+      currency,
+      description,
+      spent_on: spentOn,
+      split_mode: mode,
+      splits: result.splits,
+    };
+    if (rule) {
+      await updateGroupRule(db, rule, {
         paid_by_member_id: paidBy,
         amount_minor: amountMinor,
-        currency,
-        description,
-        spent_on: spentOn,
+        description: description.trim(),
         split_mode: mode,
         splits: result.splits,
-      },
-      expense ?? undefined,
-    );
+      });
+      onDone();
+      return toast.success(`Saved. Applies from ${relativeDayLabel(rule.next_due_on)}.`);
+    }
+    if (!expense && repeats) {
+      const first = await createRepeatingGroupExpense(db, input);
+      onDone();
+      return toast(`Added ${formatMoney(amountMinor, currency)} · ${description.trim()} · repeats every month`, {
+        action: {
+          label: "Undo",
+          onClick: async () => {
+            const created = await db.group_recurring_rules.get(first.recurring_rule_id!);
+            if (created) await updateGroupRule(db, created, { deleted_at: new Date().toISOString() });
+            await deleteGroupExpense(db, first);
+          },
+        },
+      });
+    }
+    const saved = await saveGroupExpense(db, input, expense ?? undefined);
     onDone();
     if (expense) toast.success("Saved");
     else
       toast(`Added ${formatMoney(amountMinor, currency)} · ${description.trim()}`, {
         action: { label: "Undo", onClick: () => deleteGroupExpense(db, saved) },
       });
+  }
+
+  async function stopRepeating() {
+    if (!rule) return;
+    await updateGroupRule(db, rule, { deleted_at: new Date().toISOString() });
+    onDone();
+    toast(`${rule.description} won't repeat any more`, {
+      action: { label: "Undo", onClick: () => updateGroupRule(db, rule, { deleted_at: null }) },
+    });
   }
 
   async function remove() {
@@ -184,7 +223,7 @@ export function GroupExpenseForm({ group, members, me, expense, onDone }: GroupE
               )}
             >
               <MemberAvatar id={m.id} name={m.display_name} className="size-8 text-xs" />
-              {m.id === me.id ? "You" : m.display_name}
+              {memberLabel(m, me.id)}
             </button>
           ))}
         </div>
@@ -217,7 +256,7 @@ export function GroupExpenseForm({ group, members, me, expense, onDone }: GroupE
             return (
               <li key={m.id} className="flex items-center gap-3 px-3 py-2">
                 <MemberAvatar id={m.id} name={m.display_name} className="size-8 text-xs" />
-                <span className="min-w-0 flex-1 truncate text-[15px]">{m.id === me.id ? "You" : m.display_name}</span>
+                <span className="min-w-0 flex-1 truncate text-[15px]">{memberLabel(m, me.id)}</span>
                 {mode === "equal" ? (
                   <button
                     type="button"
@@ -259,36 +298,58 @@ export function GroupExpenseForm({ group, members, me, expense, onDone }: GroupE
         </p>
       </div>
 
-      <div className="flex gap-2">
-        {[
-          { label: "Today", value: todayISO() },
-          { label: "Yesterday", value: addDays(todayISO(), -1) },
-        ].map(({ label, value }) => (
-          <button
-            key={label}
-            type="button"
-            aria-pressed={spentOn === value}
-            onClick={() => setSpentOn(value)}
-            className={cn(
-              "h-9 rounded-full border px-3.5 text-sm font-medium",
-              spentOn === value ? "border-ink bg-ink text-bg" : "border-line bg-surface",
-            )}
-          >
-            {label}
-          </button>
-        ))}
-        <label className="relative inline-flex h-9 items-center rounded-full border border-line bg-surface px-3.5 text-sm font-medium">
-          {spentOn !== todayISO() && spentOn !== addDays(todayISO(), -1) ? spentOn : "Other date…"}
-          <input
-            type="date"
-            aria-label="Pick a date"
-            value={spentOn}
-            max={todayISO()}
-            onChange={(e) => e.target.value && setSpentOn(e.target.value)}
-            className="absolute inset-0 opacity-0"
-          />
-        </label>
-      </div>
+      {rule ? (
+        <p className="px-1 text-sm text-muted">
+          Changes apply from {relativeDayLabel(rule.next_due_on)}. Months already added stay as they are.
+        </p>
+      ) : (
+        <div className="flex gap-2">
+          {[
+            { label: "Today", value: todayISO() },
+            { label: "Yesterday", value: addDays(todayISO(), -1) },
+          ].map(({ label, value }) => (
+            <button
+              key={label}
+              type="button"
+              aria-pressed={spentOn === value}
+              onClick={() => setSpentOn(value)}
+              className={cn(
+                "h-9 rounded-full border px-3.5 text-sm font-medium",
+                spentOn === value ? "border-ink bg-ink text-bg" : "border-line bg-surface",
+              )}
+            >
+              {label}
+            </button>
+          ))}
+          <label className="relative inline-flex h-9 items-center rounded-full border border-line bg-surface px-3.5 text-sm font-medium">
+            {spentOn !== todayISO() && spentOn !== addDays(todayISO(), -1) ? spentOn : "Other date…"}
+            <input
+              type="date"
+              aria-label="Pick a date"
+              value={spentOn}
+              max={todayISO()}
+              onChange={(e) => e.target.value && setSpentOn(e.target.value)}
+              className="absolute inset-0 opacity-0"
+            />
+          </label>
+        </div>
+      )}
+
+      {!expense && !rule && (
+        <div className="flex items-center gap-3 rounded-2xl border border-line bg-surface px-4 py-3">
+          <Repeat className="size-5 shrink-0 text-muted" />
+          <span className="min-w-0 flex-1">
+            <span className="block text-[15px] font-medium">Every month</span>
+            <span className="block text-sm text-muted">Added again on the same day each month, like rent</span>
+          </span>
+          <Switch label="Every month" checked={repeats} onChange={setRepeats} />
+        </div>
+      )}
+      {expense?.recurring_rule_id && (
+        <p className="flex items-center gap-1.5 px-1 text-sm text-muted">
+          <Repeat className="size-4 shrink-0" /> This month only. To change every month, edit it under Repeating.
+        </p>
+      )}
 
       <Button
         size="lg"
@@ -296,8 +357,26 @@ export function GroupExpenseForm({ group, members, me, expense, onDone }: GroupE
         onClick={save}
         disabled={!result.splits || !amountMinor || !description.trim()}
       >
-        {expense ? "Save" : "Add expense"}
+        {expense || rule ? "Save" : "Add expense"}
       </Button>
+      {rule && (
+        <div className="flex gap-2">
+          <Button
+            variant="secondary"
+            className="flex-1"
+            onClick={async () => {
+              await updateGroupRule(db, rule, { is_active: !rule.is_active });
+              onDone();
+              toast(rule.is_active ? `Paused ${rule.description}` : `${rule.description} repeats again`);
+            }}
+          >
+            {rule.is_active ? "Pause" : "Resume"}
+          </Button>
+          <Button variant="secondary" className="flex-1 text-danger" onClick={stopRepeating}>
+            Stop repeating
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

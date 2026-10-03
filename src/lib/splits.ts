@@ -11,6 +11,11 @@ export function splitEqually(amount: number, memberIds: string[]): Split[] {
   return memberIds.map((member_id, i) => ({ member_id, share_minor: base + (i < extra ? 1 : 0) }));
 }
 
+/** Even percentages to 2 decimals that add up to exactly 100, e.g. 33.34 / 33.33 / 33.33. */
+export function evenPercentages(count: number): number[] {
+  return splitEqually(100_00, Array.from({ length: count }, String)).map((s) => s.share_minor / 100);
+}
+
 /** Proportional split (largest remainder), e.g. shares 2:1:1 or percentages. */
 export function splitByWeights(amount: number, entries: { member_id: string; weight: number }[]): Split[] {
   const active = entries.filter((e) => e.weight > 0);

@@ -1,6 +1,7 @@
 // Turns "uber 340 yesterday upi" into an expense draft. Rule-based: fast, offline, predictable.
 
 import { addDays } from "./dates";
+import { parsePaymentMessage } from "./payment-message";
 
 export type QuickEntryContext = {
   today: string;
@@ -234,23 +235,22 @@ export function parseQuickEntry(text: string, context: QuickEntryContext): Quick
   return { amount, note: capitalize(note), categoryId, paymentMethodId, spentOn };
 }
 
-/** Payment confirmations shared from SMS/UPI apps: "Paid Rs.450.00 to ZOMATO via UPI Ref 1234". */
-export function parseSharedText(text: string, context: QuickEntryContext): QuickEntry {
-  const amountMatch = text.match(/(?:₹|rs\.?|inr)\s*([\d,]+(?:\.\d{1,2})?)/i) ?? text.match(/([\d,]+\.\d{2})\b/);
-  const merchantMatch = text.match(
-    /\b(?:to|at|towards)\s+([A-Za-z][A-Za-z0-9&.' -]{1,40}?)(?=\s+(?:on|via|using|ref|upi|for|from)\b|[.,\n]|$)/i,
-  );
-  const merchant = merchantMatch ? titleCase(merchantMatch[1].trim()) : "";
-  const parsed = parseQuickEntry(merchant, context);
+/**
+ * A bank SMS or UPI confirmation (shared to the app or pasted) as an expense draft: amount, the
+ * payee as the note, a category guessed from the payee, the message's date, UPI or card.
+ */
+export function parseSharedText(text: string, context: QuickEntryContext): QuickEntry & { credit: boolean } {
+  const message = parsePaymentMessage(text, context.today);
+  const parsed = parseQuickEntry(message.merchant, context);
+  const method = (pattern: RegExp) => context.paymentMethods.find((m) => pattern.test(m.name))?.id;
   return {
     ...parsed,
-    amount: amountMatch ? Number(amountMatch[1].replace(/,/g, "")) || null : null,
-    note: merchant,
-    paymentMethodId: /\bupi\b/i.test(text)
-      ? (context.paymentMethods.find((m) => /upi/i.test(m.name))?.id ?? parsed.paymentMethodId)
-      : parsed.paymentMethodId,
+    amount: message.amount,
+    note: message.merchant,
+    spentOn: message.spentOn ?? context.today,
+    paymentMethodId: (message.upi && method(/upi/i)) || (message.card && method(/card/i)) || parsed.paymentMethodId,
+    credit: message.credit,
   };
 }
 
 const capitalize = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
-const titleCase = (s: string) => s.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());

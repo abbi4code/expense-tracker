@@ -12,7 +12,9 @@
     "db:push": "supabase db push",
     "db:link": "supabase link",
     "tunnel": "cloudflared tunnel --url http://localhost:3000",
-    "format": "prettier --write src"
+    "format": "prettier --write src",
+    "test": "playwright test --project=unit",
+    "test:e2e": "playwright test --project=e2e"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",
@@ -33,6 +35,7 @@
     "web-push": "^3.6.7"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
