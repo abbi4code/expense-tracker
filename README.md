@@ -98,6 +98,18 @@ Open that URL on your phone. It forwards to your laptop's localhost, so edits ho
 - For password-reset links, add `https://*.trycloudflare.com/**` to Supabase → Authentication → URL Configuration → Redirect URLs.
 - The service worker (offline, install prompt) only runs in production: use `npm run build && npm start` instead of `npm run dev` to test those.
 
+## How it stays fast
+
+- **Static app shell.** Everything under `src/app/(app)` is prerendered: no server work or Supabase
+  query per page, so tabs switch from the client cache (≈50–100ms on a phone). Signed-out visitors
+  are redirected by `src/proxy.ts`; first-run setup is checked on the client in `DataProvider`.
+- **Local-first data.** Screens read IndexedDB (Dexie); `SyncEngine` pushes the outbox and pulls all
+  tables **in parallel**, then writes them parent-before-child.
+- **Instant open.** The service worker serves app screens you've visited from cache and refreshes
+  them in the background (`public/sw.js`); a new deploy clears those caches when it activates.
+- **Account on the device.** `src/lib/session-cache.ts` remembers which account's local data to open,
+  so the app starts without waiting for the network; Supabase confirms the session in the background.
+
 ## Project layout
 
 ```

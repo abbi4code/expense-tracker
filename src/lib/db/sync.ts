@@ -1,9 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
-import type { LocalDB, OutboxItem, RowTable } from "./local";
+import type { Group, GroupMember, LocalDB, OutboxItem, RowTable } from "./local";
 
 // Parents before children, so a fresh device never holds an expense whose category is missing.
 const ROW_TABLES: RowTable[] = ["categories", "payment_methods", "recurring_rules", "budgets", "expenses"];
+const GROUP_ROW_TABLES: RowTable[] = ["group_expenses", "settlements"];
+
+type Fetched = { table: RowTable; rows: { id: string; updated_at: string }[]; latest: string | undefined };
 const PAGE_SIZE = 1000;
 // Re-read a little before the last cursor so rows committed slightly out of order aren't missed.
 const CURSOR_OVERLAP_MS = 60_000;
@@ -164,36 +167,40 @@ export class SyncEngine {
     else await this.db.table(item.table).delete(item.rowId);
   }
 
+  /**
+   * All tables are fetched in parallel (one round trip of latency instead of ten), then written
+   * parent-before-child, so a fresh device never holds an expense whose category is missing.
+   */
   private async pull() {
     const pending = new Set((await this.db.outbox.toArray()).map((item) => item.rowId));
 
-    const { data: profile, error } = await this.supabase
-      .from("profiles")
-      .select("*")
-      .eq("id", this.db.userId)
-      .maybeSingle();
-    if (error) throw error;
-    if (profile && !pending.has(profile.id)) await this.db.profiles.put(profile);
+    const [profile, groups, members, ...fetched] = await Promise.all([
+      this.supabase.from("profiles").select("*").eq("id", this.db.userId).maybeSingle(),
+      this.supabase.from("groups").select("*"),
+      this.supabase.from("group_members").select("*"),
+      ...[...ROW_TABLES, ...GROUP_ROW_TABLES].map((table) => this.fetchTable(table)),
+    ]);
+    for (const response of [profile, groups, members]) if (response.error) throw response.error;
 
-    for (const table of ROW_TABLES) await this.pullTable(table, pending);
-    await this.pullGroups(pending);
+    if (profile.data && !pending.has(profile.data.id)) await this.db.profiles.put(profile.data);
+    const byTable = new Map(fetched.map((f) => [f.table, f]));
+    for (const table of ROW_TABLES) await this.applyTable(byTable.get(table)!, pending);
+
+    const groupsChanged = await this.applyGroups(groups.data!, members.data!, pending);
+    for (const table of GROUP_ROW_TABLES) {
+      // Joined a group: its older expenses predate our cursor, so read those tables afresh.
+      await this.applyTable(groupsChanged ? await this.fetchTable(table) : byTable.get(table)!, pending);
+    }
     await this.db.meta.put({ key: "initialSyncDone", value: true });
   }
 
   /**
    * Groups and members are read in full each time (small, and RLS returns exactly the groups
-   * you're in), so joining/leaving is picked up at once. Group expenses and settlements are
-   * incremental, restarting from scratch whenever your set of groups changes.
+   * you're in), so joining/leaving is picked up at once. Returns true when your set of groups
+   * changed (group expense/settlement cursors are then reset).
    */
-  private async pullGroups(pending: Set<string>) {
-    const [groups, members] = await Promise.all([
-      this.supabase.from("groups").select("*"),
-      this.supabase.from("group_members").select("*"),
-    ]);
-    if (groups.error) throw groups.error;
-    if (members.error) throw members.error;
-    const groupIds = new Set(groups.data.map((g) => g.id));
-
+  private async applyGroups(groups: Group[], members: GroupMember[], pending: Set<string>) {
+    const groupIds = new Set(groups.map((g) => g.id));
     await this.db.transaction(
       "rw",
       [this.db.groups, this.db.group_members, this.db.group_expenses, this.db.settlements],
@@ -205,46 +212,45 @@ export class SyncEngine {
           const rows = (await this.db.table(table).toArray()) as { id: string; group_id?: string }[];
           await this.db.table(table).bulkDelete(rows.filter((r) => !keep(r) && !pending.has(r.id)).map((r) => r.id));
         };
-        const memberIds = new Set(members.data.map((m) => m.id));
+        const memberIds = new Set(members.map((m) => m.id));
         await stale("groups", (r) => groupIds.has(r.id));
         await stale("group_members", (r) => memberIds.has(r.id));
         await stale("group_expenses", (r) => groupIds.has(r.group_id!));
         await stale("settlements", (r) => groupIds.has(r.group_id!));
-        await this.db.groups.bulkPut(groups.data.filter((g) => !pending.has(g.id)));
-        await this.db.group_members.bulkPut(members.data.filter((m) => !pending.has(m.id)));
+        await this.db.groups.bulkPut(groups.filter((g) => !pending.has(g.id)));
+        await this.db.group_members.bulkPut(members.filter((m) => !pending.has(m.id)));
       },
     );
 
     const signature = [...groupIds].sort().join(",");
-    if ((await this.db.meta.get("groupIds"))?.value !== signature) {
-      await this.db.meta.bulkDelete(["cursor:group_expenses", "cursor:settlements"]);
-      await this.db.meta.put({ key: "groupIds", value: signature });
-    }
-    await this.pullTable("group_expenses", pending);
-    await this.pullTable("settlements", pending);
+    if ((await this.db.meta.get("groupIds"))?.value === signature) return false;
+    await this.db.meta.bulkDelete(GROUP_ROW_TABLES.map((table) => `cursor:${table}`));
+    await this.db.meta.put({ key: "groupIds", value: signature });
+    return true;
   }
 
-  private async pullTable(table: RowTable, pending: Set<string>) {
-    const cursorKey = `cursor:${table}`;
-    const cursor = (await this.db.meta.get(cursorKey))?.value as string | undefined;
+  /** Rows changed since the table's cursor (paged). Network only; nothing is written yet. */
+  private async fetchTable(table: RowTable): Promise<Fetched> {
+    const cursor = (await this.db.meta.get(`cursor:${table}`))?.value as string | undefined;
     let from = cursor ? new Date(new Date(cursor).getTime() - CURSOR_OVERLAP_MS).toISOString() : null;
-    let latest = cursor;
+    const rows: { id: string; updated_at: string }[] = [];
 
     for (;;) {
       let query = this.supabase.from(table).select("*").order("updated_at").order("id").limit(PAGE_SIZE);
       if (from) query = query.gte("updated_at", from);
       const { data, error } = await query;
       if (error) throw error;
-
-      const rows = data.filter((row) => !pending.has(row.id));
-      if (rows.length) await this.db.table(table).bulkPut(rows);
-      if (data.length) latest = data[data.length - 1].updated_at;
-
+      rows.push(...(data as { id: string; updated_at: string }[]));
       const last = data[data.length - 1];
       if (data.length < PAGE_SIZE || last.updated_at === data[0].updated_at) break;
       from = last.updated_at;
     }
+    return { table, rows, latest: rows.length ? rows[rows.length - 1].updated_at : cursor };
+  }
 
-    if (latest) await this.db.meta.put({ key: cursorKey, value: latest });
+  private async applyTable({ table, rows, latest }: Fetched, pending: Set<string>) {
+    const fresh = rows.filter((row) => !pending.has(row.id));
+    if (fresh.length) await this.db.table(table).bulkPut(fresh);
+    if (latest) await this.db.meta.put({ key: `cursor:${table}`, value: latest });
   }
 }

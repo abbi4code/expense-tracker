@@ -35,9 +35,9 @@ import { ThemePicker } from "./theme-picker";
 
 type Editing = "name" | "currency" | "monthStart" | null;
 
-export function SettingsScreen({ email }: { email?: string }) {
+export function SettingsScreen() {
   const router = useRouter();
-  const { db } = useData();
+  const { db, email } = useData();
   const profile = useProfile();
   const [editing, setEditing] = useState<Editing>(null);
 
@@ -56,7 +56,7 @@ export function SettingsScreen({ email }: { email?: string }) {
           hint={profile?.display_name || "Not set"}
           onClick={() => setEditing("name")}
         />
-        <SettingsRow icon={icon(Mail)} label="Email" hint={email} />
+        <SettingsRow icon={icon(Mail)} label="Email" hint={email ?? undefined} />
       </SettingsGroup>
 
       <SettingsGroup title="Money">

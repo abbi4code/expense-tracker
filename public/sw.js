@@ -7,7 +7,12 @@ const PRECACHE_CACHE = `precache-${VERSION}`;
 // Not versioned: hashed chunk names never collide, and cached pages from an older
 // build still need their chunks to render offline.
 const STATIC_CACHE = "next-static";
+// Pages you've opened (served instantly, refreshed in the background) and pages only
+// pre-cached for offline use. Both are cleared when a new version takes over.
 const PAGES_CACHE = "pages";
+const WARM_CACHE = "pages-warm";
+// The signed-in app: static shells that render from on-device data.
+const APP_PAGES = /^\/(home|activity|insights|groups|settings)(\/|$)/;
 const ASSETS_CACHE = "assets";
 const OFFLINE_URL = "/offline.html"; // self-contained, works with no other assets
 
@@ -26,6 +31,8 @@ self.addEventListener("activate", (event) => {
           .filter((key) => key.startsWith("precache-") && key !== PRECACHE_CACHE)
           .map((key) => caches.delete(key)),
       );
+      // New version: drop page shells from the old build so the next load fetches fresh ones.
+      await Promise.all([caches.delete(PAGES_CACHE), caches.delete(WARM_CACHE)]);
       await self.clients.claim();
     })(),
   );
@@ -34,7 +41,7 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("message", (event) => {
   if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
   if (event.data?.type === "CLEAR_USER_CACHE") {
-    event.waitUntil(caches.delete(PAGES_CACHE));
+    event.waitUntil(Promise.all([caches.delete(PAGES_CACHE), caches.delete(WARM_CACHE)]));
   }
   // Pre-cache the app's tabs after sign-in so every tab opens offline, not just visited ones.
   if (event.data?.type === "WARM_PAGES") {
@@ -56,9 +63,10 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Page loads: network-first, fall back to the last cached copy, then the offline page.
+  // App screens: open instantly from the copy saved last time, refresh it in the background.
+  // Other pages (login, landing…): network first, cached copy or offline page as fallback.
   if (request.mode === "navigate") {
-    event.respondWith(networkFirstPage(request));
+    event.respondWith(APP_PAGES.test(url.pathname) ? cachedAppPage(event, request) : networkFirstPage(request));
     return;
   }
 
@@ -104,8 +112,34 @@ self.addEventListener("notificationclick", (event) => {
   );
 });
 
-async function warmPages(urls) {
+/** Page shells are the same for every query string (?add=1 etc.), so key them by path. */
+const pageKey = (request) => new URL(request.url).origin + new URL(request.url).pathname;
+
+async function cachedAppPage(event, request) {
   const cache = await caches.open(PAGES_CACHE);
+  const network = fetch(request).then(async (response) => {
+    // Redirects (e.g. to /login after signing out elsewhere) are never cached.
+    if (response.ok && !response.redirected) await cache.put(pageKey(request), response.clone());
+    return response;
+  });
+  const cached = await cache.match(pageKey(request));
+  if (cached) {
+    event.waitUntil(network.catch(() => undefined));
+    return cached;
+  }
+  try {
+    return await network;
+  } catch {
+    return (
+      (await caches.match(pageKey(request))) ||
+      (await caches.match(OFFLINE_URL)) ||
+      new Response("You're offline", { status: 503, headers: { "Content-Type": "text/plain" } })
+    );
+  }
+}
+
+async function warmPages(urls) {
+  const cache = await caches.open(WARM_CACHE);
   await Promise.all(
     urls.map(async (url) => {
       try {
@@ -136,6 +170,7 @@ async function networkFirstPage(request) {
   } catch {
     return (
       (await cache.match(request)) ||
+      (await caches.match(pageKey(request))) ||
       (await caches.match(OFFLINE_URL)) ||
       new Response("You're offline", { status: 503, headers: { "Content-Type": "text/plain" } })
     );

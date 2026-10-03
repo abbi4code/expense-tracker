@@ -123,3 +123,13 @@ nav,
     display: none;
   }
 }
+
+/* Snappier sheets: vaul's default slide is 0.5s, which feels slow on a phone. The extra
+   attribute selector beats vaul's own styles, which are injected after ours. */
+[data-vaul-drawer][data-vaul-drawer-direction] {
+  animation-duration: 0.28s;
+  transition-duration: 0.28s;
+}
+[data-vaul-overlay][data-vaul-snap-points] {
+  animation-duration: 0.2s;
+}

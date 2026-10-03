@@ -56,7 +56,7 @@ export function SignupForm({ next = "/home" }: { next?: string }) {
     }
     // Email confirmation off (the default here): the user is signed in straight away.
     if (data.session) {
-      router.replace(next);
+      router.replace(next === "/home" ? "/welcome" : next);
       router.refresh();
       return;
     }

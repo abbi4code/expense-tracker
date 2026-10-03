@@ -1,30 +1,85 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo } from "react";
+import { useLiveQuery } from "dexie-react-hooks";
+import { useRouter } from "next/navigation";
+import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
-import { openLocalDB, type LocalDB } from "@/lib/db/local";
-import { addDueRecurringExpenses, setSyncRequester, syncGroupShares, updateProfile } from "@/lib/db/mutations";
-import { kindOf } from "@/lib/db/local";
-import { parseQuickEntry } from "@/lib/quick-entry";
 import { todayISO } from "@/lib/dates";
+import { kindOf, openLocalDB, type LocalDB } from "@/lib/db/local";
+import { addDueRecurringExpenses, setSyncRequester, syncGroupShares, updateProfile } from "@/lib/db/mutations";
 import { SyncEngine } from "@/lib/db/sync";
+import { parseQuickEntry } from "@/lib/quick-entry";
+import {
+  readCachedSessionRaw,
+  subscribeCachedSession,
+  writeCachedSession,
+  type CachedSession,
+} from "@/lib/session-cache";
 import { createClient } from "@/lib/supabase/client";
 
-type DataContextValue = { db: LocalDB; sync: () => Promise<void> };
+type DataContextValue = { db: LocalDB; sync: () => Promise<void>; email: string | null };
 
 const DataContext = createContext<DataContextValue | null>(null);
 
 const PULL_INTERVAL_MS = 60_000;
 
-/** Opens the signed-in user's on-device DB and keeps it in sync with Supabase. */
-export function DataProvider({ userId, children }: { userId: string; children: React.ReactNode }) {
+/**
+ * Opens the signed-in user's on-device DB and keeps it in sync with Supabase.
+ *
+ * The app's pages are static and render entirely from this local data, so there's no server
+ * round trip per page. The account comes from the device's last session (instant, works
+ * offline) and is confirmed with Supabase in the background; signed-out users go to /login.
+ */
+export function DataProvider({ children, fallback }: { children: React.ReactNode; fallback: React.ReactNode }) {
+  const cachedRaw = useSyncExternalStore(subscribeCachedSession, readCachedSessionRaw, () => null);
+  const cached = useMemo(() => (cachedRaw ? (JSON.parse(cachedRaw) as CachedSession) : null), [cachedRaw]);
+
+  useEffect(() => {
+    createClient()
+      .auth.getSession()
+      .then(({ data, error }) => {
+        const user = data.session?.user;
+        if (user) {
+          if (user.id !== cached?.userId || (user.email ?? null) !== cached?.email) {
+            writeCachedSession({ userId: user.id, email: user.email ?? null });
+          }
+          return;
+        }
+        // Offline (or Supabase unreachable) with an expired token: keep working on local data.
+        if ((!navigator.onLine || error) && cached) return;
+        writeCachedSession(null);
+        window.location.replace(`/login?next=${encodeURIComponent(location.pathname + location.search)}`);
+      });
+    // Only on first load; later sign-outs go through the Sign out button.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (!cached) return fallback;
+  return (
+    <UserData key={cached.userId} userId={cached.userId} email={cached.email}>
+      {children}
+    </UserData>
+  );
+}
+
+function UserData({ userId, email, children }: { userId: string; email: string | null; children: React.ReactNode }) {
+  const router = useRouter();
   const db = useMemo(() => openLocalDB(userId), [userId]);
   const engine = useMemo(() => new SyncEngine(db, createClient(), (_item, message) => toast.error(message)), [db]);
+  // First-run setup check, only after a sync in this session (so a stale local copy can't bounce
+  // someone back to setup they just finished).
+  const [syncedNow, setSyncedNow] = useState(false);
+  const profile = useLiveQuery(() => db.profiles.get(userId), [db, userId]);
+
+  useEffect(() => {
+    if (syncedNow && profile && !profile.onboarded_at) router.replace("/welcome");
+  }, [syncedNow, profile, router]);
 
   useEffect(() => {
     // After syncing (so rules are up to date), add any recurring bills that have come due.
     const sync = async () => {
       await engine.sync();
+      setSyncedNow(true);
       if (!(await db.meta.get("initialSyncDone"))?.value) return;
       await addDueRecurringExpenses(db);
       // Your share of group expenses → personal expenses (category guessed from the description).
@@ -53,7 +108,10 @@ export function DataProvider({ userId, children }: { userId: string; children: R
 
     // Ask the service worker (production only) to cache every tab for offline use.
     navigator.serviceWorker?.ready.then((registration) =>
-      registration.active?.postMessage({ type: "WARM_PAGES", urls: ["/home", "/activity", "/insights", "/settings"] }),
+      registration.active?.postMessage({
+        type: "WARM_PAGES",
+        urls: ["/home", "/activity", "/insights", "/groups", "/settings"],
+      }),
     );
 
     const syncIfVisible = () => document.visibilityState === "visible" && sync();
@@ -71,7 +129,7 @@ export function DataProvider({ userId, children }: { userId: string; children: R
     };
   }, [db, engine]);
 
-  const value = useMemo(() => ({ db, sync: engine.sync }), [db, engine]);
+  const value = useMemo(() => ({ db, sync: engine.sync, email }), [db, engine, email]);
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 }
 

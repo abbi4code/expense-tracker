@@ -5,12 +5,14 @@ import { useState } from "react";
 import { useData } from "@/components/data/data-provider";
 import { Button } from "@/components/ui/button";
 import { deleteLocalDB } from "@/lib/db/local";
+import { writeCachedSession } from "@/lib/session-cache";
 import { createClient } from "@/lib/supabase/client";
 
 /** Signs out and wipes this user's data from the device (local DB + cached pages). */
 export async function clearDeviceData(userId: string) {
+  writeCachedSession(null);
   await deleteLocalDB(userId);
-  if ("caches" in window) await caches.delete("pages");
+  if ("caches" in window) await Promise.all([caches.delete("pages"), caches.delete("pages-warm")]);
 }
 
 export function SignOutButton() {
